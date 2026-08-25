@@ -1,9 +1,15 @@
-import io, json, os, random, sqlite3, time, urllib.request
+import base64, io, json, os, random, sqlite3, time, urllib.request
 from collections import Counter
 from PIL import Image
 
 RANKS=["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
 ASSETS=os.path.join(os.path.dirname(__file__),"assets")
+
+def prepare_assets():
+ for name in ("table","dog_states","hands_cards"):
+  png=os.path.join(ASSETS,name+".png")
+  if not os.path.exists(png):
+   with open(os.path.join(ASSETS,name+".png.b64")) as src, open(png,"wb") as dst: dst.write(base64.b64decode(src.read()))
 
 class API:
  def __init__(self,t): self.u=f"https://api.telegram.org/bot{t}/"
@@ -75,6 +81,7 @@ def check(g,store):
   g["m"]=f"{'Вы победили!' if win else 'Пёс победил!'} Счёт {len(g['pb'])}:{len(g['db'])}";store.finish(g,win)
 
 def main():
+ prepare_assets()
  token=os.getenv("BOT_TOKEN")
  if not token: raise SystemExit("BOT_TOKEN required")
  api=API(token);store=Store(os.getenv("DATABASE_PATH","cards.sqlite3"));off=0
