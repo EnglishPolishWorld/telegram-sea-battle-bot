@@ -24,6 +24,10 @@ class GameTests(unittest.TestCase):
         total += 4 * (len(game["player_books"]) + len(game["dog_books"]))
         self.assertEqual(total, 36)
 
+    def test_cards_use_graphical_unicode_faces(self):
+        self.assertEqual(bot.card_label("AS"), "🂡")
+        self.assertEqual(bot.card_label("KH"), "🂾")
+
 
 if __name__ == "__main__":
     unittest.main()
