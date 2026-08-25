@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import random
@@ -13,6 +14,9 @@ from collections import Counter
 RANKS = ["6", "7", "8", "9", "10", "J", "Q", "K", "A"]
 SUITS = [("S", "♠"), ("H", "♥"), ("D", "♦"), ("C", "♣")]
 ALL_CARDS = [rank + code for rank in RANKS for code, _ in SUITS]
+CARD_BASES = {"S": 0x1F0A0, "H": 0x1F0B0, "D": 0x1F0C0, "C": 0x1F0D0}
+CARD_VALUES = {"A": 1, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "J": 11, "Q": 13, "K": 14}
+ASSETS = os.path.join(os.path.dirname(__file__), "assets", "dog")
 
 
 class API:
@@ -34,16 +38,37 @@ class API:
             raise RuntimeError(result)
         return result["result"]
 
-    def send_rich(self, chat_id: int, view: dict):
-        return self.call("sendRichMessage", {"chat_id": chat_id, "rich_message": view})
+    def multipart(self, method: str, payload: dict, image: bytes):
+        boundary = "----carddogboundary"
+        body = bytearray()
+        for name, value in payload.items():
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False)
+            body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode())
+        body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"dog_scene\"; filename=\"dog.png\"\r\nContent-Type: image/png\r\n\r\n".encode())
+        body.extend(image)
+        body.extend(f"\r\n--{boundary}--\r\n".encode())
+        request = urllib.request.Request(
+            self.base + method, bytes(body),
+            {"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        with urllib.request.urlopen(request, timeout=60) as response:
+            result = json.loads(response.read())
+        if not result.get("ok"):
+            raise RuntimeError(result)
+        return result["result"]
 
-    def edit_rich(self, chat_id: int, message_id: int, view: dict, inline_id: str | None = None):
+    def send_rich(self, chat_id: int, view: dict, image: bytes | None = None):
+        payload = {"chat_id": chat_id, "rich_message": view}
+        return self.multipart("sendRichMessage", payload, image) if image else self.call("sendRichMessage", payload)
+
+    def edit_rich(self, chat_id: int, message_id: int, view: dict, inline_id: str | None = None, image: bytes | None = None):
         data = {"rich_message": view}
         if inline_id:
             data["inline_message_id"] = inline_id
         else:
             data.update({"chat_id": chat_id, "message_id": message_id})
-        return self.call("editMessageText", data)
+        return self.multipart("editMessageText", data, image) if image else self.call("editMessageText", data)
 
     def answer_inline(self, query_id: str, view: dict):
         return self.call("answerInlineQuery", {
@@ -136,6 +161,7 @@ def new_game(user_id: int) -> dict:
         "dog_books": [],
         "message": "Ваш ход: нажмите любую открытую карту.",
         "mood": "🐶",
+        "pose": 0,
         "done": False,
         "started": int(time.time()),
     }
@@ -158,11 +184,13 @@ def dog_turn(game: dict):
         game["dog"] += received
         game["message"] += f"\n🐕 Пёс попросил {wanted} и забрал {len(received)}."
         game["mood"] = "😏"
+        game["pose"] = 1
     else:
         if game["deck"]:
             game["dog"].append(game["deck"].pop())
         game["message"] += f"\n🐕 Пёс попросил {wanted}, но вытянул карту."
         game["mood"] = "🐶"
+        game["pose"] = 2
     game["dog_books"] += take_books(game["dog"])
     refill(game)
 
@@ -174,6 +202,7 @@ def finish_if_needed(game: dict, store: Store):
         won = len(game["player_books"]) > len(game["dog_books"])
         game["done"] = True
         game["mood"] = "😡" if won else "🥳"
+        game["pose"] = 6 if won else 7
         game["message"] = (
             f"{'Вы победили!' if won else 'Карточный Пёс победил!'} "
             f"Счёт {len(game['player_books'])}:{len(game['dog_books'])}."
@@ -189,12 +218,16 @@ def button(text: str, data: str, style: str | None = None) -> dict:
 
 
 def card_label(card: str) -> str:
-    code = card[-1]
-    symbol = dict(SUITS)[code]
-    return rank(card) + symbol
+    return chr(CARD_BASES[card[-1]] + CARD_VALUES[rank(card)])
 
 
-def game_view(game: dict) -> dict:
+def dog_image(game: dict) -> bytes:
+    path = os.path.join(ASSETS, f"{game.get('pose', 0)}.png.b64")
+    with open(path, encoding="ascii") as source:
+        return base64.b64decode(source.read())
+
+
+def game_view(game: dict, graphical: bool = True) -> dict:
     dog_cells = [{
         "text": {"type": "button", "button": button("🂠", "noop")},
         "align": "center", "valign": "middle",
@@ -215,7 +248,13 @@ def game_view(game: dict) -> dict:
         player_cells = [{"text": {"type": "button", "button": button("—", "noop")},
                          "align": "center", "valign": "middle"}]
     elapsed = max(0, int(time.time()) - game["started"])
-    blocks = [
+    blocks = []
+    if graphical:
+        blocks.append({
+            "type": "photo",
+            "photo": {"type": "photo", "media": "attach://dog_scene"},
+        })
+    blocks += [
         {"type": "heading", "size": 2, "text": f"{game['mood']} Карточный Пёс"},
         {"type": "paragraph", "text": game["message"]},
         {"type": "paragraph", "text": f"Карты пса · {len(game['dog'])} шт."},
@@ -269,7 +308,7 @@ def main():
                     inline = update["inline_query"]
                     game = new_game(inline["from"]["id"])
                     store.save(game)
-                    api.answer_inline(inline["id"], game_view(game))
+                    api.answer_inline(inline["id"], game_view(game, False))
                 elif "message" in update:
                     message = update["message"]
                     text = message.get("text", "").split("@", 1)[0]
@@ -292,7 +331,7 @@ def main():
                     elif text in {"/start", "/new", "/group"}:
                         game = new_game(message["from"]["id"])
                         store.save(game)
-                        api.send_rich(message["chat"]["id"], game_view(game))
+                        api.send_rich(message["chat"]["id"], game_view(game), dog_image(game))
                 elif "callback_query" in update:
                     query = update["callback_query"]
                     data = query["data"]
@@ -327,18 +366,23 @@ def main():
                             game["player"] += received
                             game["message"] = f"Пёс отдал вам {len(received)} карт ранга {wanted}!"
                             game["mood"] = "😮"
+                            game["pose"] = 5
                         else:
                             drawn = game["deck"].pop() if game["deck"] else None
                             if drawn:
                                 game["player"].append(drawn)
                             game["message"] = f"У пса нет {wanted}. Вы вытянули карту."
                             game["mood"] = "😄"
+                            game["pose"] = 4
                         game["player_books"] += take_books(game["player"])
                         dog_turn(game)
                     finish_if_needed(game, store)
                     store.save(game)
                     api.answer(query["id"])
-                    api.edit_rich(chat_id, message_id, game_view(game), inline_id)
+                    api.edit_rich(
+                        chat_id, message_id, game_view(game, not bool(inline_id)), inline_id,
+                        None if inline_id else dog_image(game),
+                    )
         except Exception as error:
             print(type(error).__name__, error)
             time.sleep(3)
