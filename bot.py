@@ -254,12 +254,12 @@ def render_scene(game: dict) -> bytes:
     visible = sorted(game["player"], key=lambda item: (RANKS.index(rank(item)), item[-1]))[:12]
     count = len(visible)
     span = min(1040, 380 + max(0, count - 1) * 60)
-    max_angle = min(28, 12 + count * 1.4)
+    max_angle = min(18, 8 + count * 0.85)
     for index, card in enumerate(visible):
         normal = 0 if count == 1 else index / (count - 1) * 2 - 1
         center_x = 640 if count == 1 else 640 - span / 2 + index * span / (count - 1)
         center_y = 385 - (1 - abs(normal)) * 100
-        angle = normal * max_angle
+        angle = -normal * max_angle
         value, suit = rank(card), dict(SUITS)[card[-1]]
         color = "#c51f32" if card[-1] in {"H", "D"} else "#17151a"
         card_face = Image.new("RGBA", (160, 245), (0, 0, 0, 0))
