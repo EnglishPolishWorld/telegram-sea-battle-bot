@@ -79,8 +79,8 @@ class API:
         return self.call("answerInlineQuery", {
             "inline_query_id": query_id, "cache_time": 0, "is_personal": True,
             "results": [{"type": "article", "id": uuid.uuid4().hex[:12],
-                "title": "Играть с Карточным Псом",
-                "description": "Go Fish — 7 карт в руке",
+                "title": "Играть в Сундучки с Псом",
+                "description": "Сундучки — 7 карт в руке",
                 "input_message_content": {"rich_message": view}}],
         })
 
@@ -245,32 +245,41 @@ def render_scene(game: dict) -> bytes:
     dog.thumbnail((330, 410), Image.Resampling.NEAREST)
     canvas.alpha_composite(dog, ((1280 - dog.width) // 2, 45))
 
-    hands = load_asset(os.path.join(ASSET_ROOT, "hands_blank.png.b64")).resize(
+    hands = load_asset(os.path.join(ASSET_ROOT, "hands_only.webp.b64")).resize(
         (1280, 720), Image.Resampling.LANCZOS
     )
-    draw = ImageDraw.Draw(hands)
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    font = ImageFont.truetype(font_path, 42)
+    font = ImageFont.truetype(font_path, 34)
     small = ImageFont.truetype(font_path, 22)
-    positions = [(294, 340), (400, 312), (510, 292), (630, 285), (752, 294), (870, 317), (982, 350)]
     visible = sorted(game["player"], key=lambda item: (RANKS.index(rank(item)), item[-1]))[:12]
-    for card, (x, y) in zip(visible[:7], positions):
+    count = len(visible)
+    span = min(1040, 380 + max(0, count - 1) * 60)
+    max_angle = min(28, 12 + count * 1.4)
+    for index, card in enumerate(visible):
+        normal = 0 if count == 1 else index / (count - 1) * 2 - 1
+        center_x = 640 if count == 1 else 640 - span / 2 + index * span / (count - 1)
+        center_y = 385 - (1 - abs(normal)) * 100
+        angle = normal * max_angle
         value, suit = rank(card), dict(SUITS)[card[-1]]
         color = "#c51f32" if card[-1] in {"H", "D"} else "#17151a"
-        draw.text((x, y), value, fill=color, font=font, anchor="mm", stroke_width=1, stroke_fill="white")
-        draw.text((x, y + 42), suit, fill=color, font=font, anchor="mm")
-    canvas.alpha_composite(hands)
-    scene_draw = ImageDraw.Draw(canvas)
-    extra_positions = [(410 + index * 116, 515) for index in range(5)]
-    for card, (x, y) in zip(visible[7:12], extra_positions):
-        color = "#c51f32" if card[-1] in {"H", "D"} else "#17151a"
-        scene_draw.rounded_rectangle(
-            (x - 43, y - 60, x + 43, y + 60), 9,
-            fill="#fffaf0", outline="#6d4a2f", width=3,
+        card_face = Image.new("RGBA", (160, 245), (0, 0, 0, 0))
+        card_draw = ImageDraw.Draw(card_face)
+        card_draw.rounded_rectangle(
+            (3, 3, 156, 241), 12, fill="#fffdf8", outline="#4e2d21", width=4,
         )
-        scene_draw.text((x, y - 17), rank(card), fill=color, font=font, anchor="mm")
-        scene_draw.text((x, y + 29), dict(SUITS)[card[-1]], fill=color, font=font, anchor="mm")
+        card_draw.rounded_rectangle(
+            (8, 8, 151, 236), 9, outline="#e7cba6", width=2,
+        )
+        card_draw.text((19, 16), value, fill=color, font=font, stroke_width=1, stroke_fill="white")
+        card_draw.text((21, 57), suit, fill=color, font=font)
+        turned = card_face.rotate(angle, Image.Resampling.BICUBIC, expand=True)
+        canvas.alpha_composite(
+            turned,
+            (round(center_x - turned.width / 2), round(center_y - turned.height / 2)),
+        )
+    canvas.alpha_composite(hands)
     if len(game["player"]) > 12:
+        scene_draw = ImageDraw.Draw(canvas)
         scene_draw.rounded_rectangle((1080, 565, 1245, 630), 12, fill="#6e1026", outline="#f0c36a", width=3)
         scene_draw.text((1162, 597), f"+{len(game['player'])-12} карт", fill="white", font=small, anchor="mm")
     output = BytesIO()
@@ -306,7 +315,7 @@ def game_view(game: dict, graphical: bool = True) -> dict:
             "photo": {"type": "photo", "media": "attach://dog_scene"},
         })
     blocks += [
-        {"type": "heading", "size": 2, "text": f"{game['mood']} Карточный Пёс"},
+        {"type": "heading", "size": 2, "text": f"{game['mood']} Сундучки с Псом"},
         {"type": "paragraph", "text": game["message"]},
         {"type": "paragraph", "text": f"Карты пса · {len(game['dog'])} шт."},
         {"type": "table", "cells": [dog_cells[i:i+7] for i in range(0, len(dog_cells), 7)] or [[]],
@@ -336,7 +345,7 @@ def main():
     api = API(token)
     store = Store(os.getenv("DATABASE_PATH", "cards.sqlite3"))
     commands = [
-        {"command": "start", "description": "Играть с Карточным Псом"},
+        {"command": "start", "description": "Играть в Сундучки с Псом"},
         {"command": "new", "description": "Новая игра"},
         {"command": "group", "description": "Запустить игру в группе"},
         {"command": "stats", "description": "Моя статистика"},
