@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import bot
 
@@ -9,7 +10,8 @@ class GameTests(unittest.TestCase):
         self.assertEqual(len(set(bot.ALL_CARDS)), 36)
 
     def test_initial_hands_have_seven_clickable_cards(self):
-        game = bot.new_game(1)
+        with patch("bot.random.shuffle", lambda deck: None):
+            game = bot.new_game(1)
         tables = [block for block in bot.game_view(game)["blocks"] if block["type"] == "table"]
         self.assertEqual(len(game["player"]), 7)
         self.assertEqual(len(game["dog"]), 7)
