@@ -22,6 +22,31 @@ CARD_VALUES = {"A": 1, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "J": 11, "Q": 1
 RANK_NAMES = {"A": "Туз", "K": "Король", "Q": "Дама", "J": "Валет"}
 ASSET_ROOT = os.path.join(os.path.dirname(__file__), "assets")
 ASSETS = os.path.join(ASSET_ROOT, "dog")
+DIFFICULTIES = {
+    "easy": {"name": "Лёгкая", "reward": 5, "icon": "🌱"},
+    "medium": {"name": "Средняя", "reward": 10, "icon": "🎯"},
+    "hard": {"name": "Сложная", "reward": 15, "icon": "🔥"},
+}
+ITEMS = {
+    "scent": {
+        "name": "Нюх",
+        "icon": "👃",
+        "price": 10,
+        "description": "Показывает один ранг, который есть у пса.",
+    },
+    "double_draw": {
+        "name": "Двойной добор",
+        "icon": "🃏",
+        "price": 15,
+        "description": "Берёт две карты из колоды без хода пса.",
+    },
+    "shield": {
+        "name": "Защита",
+        "icon": "🛡️",
+        "price": 20,
+        "description": "Отменяет следующий ход пса.",
+    },
+}
 
 
 class API:
@@ -101,7 +126,18 @@ class Store:
             "CREATE TABLE IF NOT EXISTS stats(user_id INTEGER PRIMARY KEY,wins INTEGER DEFAULT 0,"
             "losses INTEGER DEFAULT 0,streak INTEGER DEFAULT 0,best INTEGER DEFAULT 0)"
         )
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(stats)")}
+        if "coins" not in columns:
+            self.db.execute("ALTER TABLE stats ADD COLUMN coins INTEGER DEFAULT 0")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS inventory("
+            "user_id INTEGER NOT NULL,item TEXT NOT NULL,quantity INTEGER DEFAULT 0,"
+            "PRIMARY KEY(user_id,item))"
+        )
         self.db.commit()
+
+    def ensure_user(self, user_id: int):
+        self.db.execute("INSERT OR IGNORE INTO stats(user_id) VALUES(?)", (user_id,))
 
     def save(self, game: dict):
         self.db.execute(
@@ -114,24 +150,61 @@ class Store:
         row = self.db.execute("SELECT state FROM games WHERE id=?", (game_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def record(self, user_id: int, won: bool):
-        self.db.execute("INSERT OR IGNORE INTO stats(user_id) VALUES(?)", (user_id,))
+    def record(self, user_id: int, won: bool, reward: int = 0):
+        self.ensure_user(user_id)
         self.db.execute(
             "UPDATE stats SET wins=wins+?,losses=losses+?,"
             "streak=CASE WHEN ? THEN streak+1 ELSE 0 END,"
-            "best=MAX(best,CASE WHEN ? THEN streak+1 ELSE best END) WHERE user_id=?",
-            (int(won), int(not won), int(won), int(won), user_id),
+            "best=MAX(best,CASE WHEN ? THEN streak+1 ELSE best END),"
+            "coins=coins+? WHERE user_id=?",
+            (int(won), int(not won), int(won), int(won), reward, user_id),
         )
         self.db.commit()
 
     def stats(self, user_id: int):
         return self.db.execute(
-            "SELECT wins,losses,streak,best FROM stats WHERE user_id=?", (user_id,)
-        ).fetchone() or (0, 0, 0, 0)
+            "SELECT wins,losses,streak,best,coins FROM stats WHERE user_id=?", (user_id,)
+        ).fetchone() or (0, 0, 0, 0, 0)
+
+    def inventory(self, user_id: int) -> dict[str, int]:
+        owned = {key: 0 for key in ITEMS}
+        owned.update(dict(self.db.execute(
+            "SELECT item,quantity FROM inventory WHERE user_id=?", (user_id,)
+        ).fetchall()))
+        return owned
+
+    def buy(self, user_id: int, item: str) -> tuple[bool, str]:
+        product = ITEMS.get(item)
+        if not product:
+            return False, "Товар не найден."
+        self.ensure_user(user_id)
+        coins = self.stats(user_id)[4]
+        if coins < product["price"]:
+            return False, f"Не хватает {product['price'] - coins} монет."
+        self.db.execute(
+            "UPDATE stats SET coins=coins-? WHERE user_id=?",
+            (product["price"], user_id),
+        )
+        self.db.execute(
+            "INSERT INTO inventory(user_id,item,quantity) VALUES(?,?,1) "
+            "ON CONFLICT(user_id,item) DO UPDATE SET quantity=quantity+1",
+            (user_id, item),
+        )
+        self.db.commit()
+        return True, f"Куплено: {product['icon']} {product['name']}."
+
+    def consume(self, user_id: int, item: str) -> bool:
+        cursor = self.db.execute(
+            "UPDATE inventory SET quantity=quantity-1 "
+            "WHERE user_id=? AND item=? AND quantity>0",
+            (user_id, item),
+        )
+        self.db.commit()
+        return cursor.rowcount == 1
 
     def leaders(self):
         return self.db.execute(
-            "SELECT user_id,wins,best FROM stats ORDER BY wins DESC,best DESC LIMIT 10"
+            "SELECT user_id,wins,best,coins FROM stats ORDER BY wins DESC,best DESC LIMIT 10"
         ).fetchall()
 
 
@@ -153,7 +226,9 @@ def refill(game: dict):
                 game[key].append(game["deck"].pop())
 
 
-def new_game(user_id: int) -> dict:
+def new_game(user_id: int, difficulty: str = "easy") -> dict:
+    if difficulty not in DIFFICULTIES:
+        difficulty = "easy"
     deck = ALL_CARDS.copy()
     random.shuffle(deck)
     game = {
@@ -167,6 +242,8 @@ def new_game(user_id: int) -> dict:
         "message": "Ваш ход: нажмите любую открытую карту.",
         "mood": "🐶",
         "pose": 0,
+        "difficulty": difficulty,
+        "shielded": False,
         "done": False,
         "started": int(time.time()),
     }
@@ -182,7 +259,18 @@ def dog_turn(game: dict):
     refill(game)
     if not game["dog"] or not game["player"]:
         return
-    wanted = rank(random.choice(game["dog"]))
+    counts = Counter(rank(card) for card in game["dog"])
+    difficulty = game.get("difficulty", "easy")
+    if difficulty == "hard":
+        player_ranks = {rank(card) for card in game["player"]}
+        known_hits = [value for value in counts if value in player_ranks]
+        wanted = max(known_hits, key=counts.get) if known_hits else max(counts, key=counts.get)
+    elif difficulty == "medium":
+        best_count = max(counts.values())
+        best_ranks = [value for value, amount in counts.items() if amount == best_count]
+        wanted = random.choice(best_ranks)
+    else:
+        wanted = rank(random.choice(game["dog"]))
     received = [card for card in game["player"] if rank(card) == wanted]
     if received:
         game["player"] = [card for card in game["player"] if rank(card) != wanted]
@@ -201,6 +289,8 @@ def dog_turn(game: dict):
 
 
 def finish_if_needed(game: dict, store: Store):
+    if game.get("done"):
+        return
     if len(game["player_books"]) + len(game["dog_books"]) == 9 or (
         not game["deck"] and (not game["player"] or not game["dog"])
     ):
@@ -208,11 +298,13 @@ def finish_if_needed(game: dict, store: Store):
         game["done"] = True
         game["mood"] = "😡" if won else "🥳"
         game["pose"] = 6 if won else 7
+        reward = DIFFICULTIES.get(game.get("difficulty", "easy"), DIFFICULTIES["easy"])["reward"] if won else 0
         game["message"] = (
             f"{'Вы победили!' if won else 'Карточный Пёс победил!'} "
             f"Счёт {len(game['player_books'])}:{len(game['dog_books'])}."
+            + (f" Награда: +{reward} монет 🪙" if reward else "")
         )
-        store.record(game["uid"], won)
+        store.record(game["uid"], won, reward)
 
 
 def button(text: str, data: str, style: str | None = None) -> dict:
@@ -229,6 +321,46 @@ def card_label(card: str) -> str:
 def card_button_label(card: str) -> str:
     value = rank(card)
     return f"{card_label(card)} {RANK_NAMES.get(value, value)} {dict(SUITS)[card[-1]]}"
+
+
+def difficulty_view() -> dict:
+    return {"blocks": [
+        {"type": "heading", "size": 2, "text": "🐶 Сундучки с Псом"},
+        {"type": "paragraph", "text": (
+            "Выберите сложность. Монеты выдаются только за победу:\n"
+            "🌱 Лёгкая — 5 🪙\n🎯 Средняя — 10 🪙\n🔥 Сложная — 15 🪙"
+        )},
+        {"type": "buttons", "align": "center", "buttons": [
+            button("🌱 Лёгкая · 5", "difficulty:easy", "success"),
+            button("🎯 Средняя · 10", "difficulty:medium", "primary"),
+            button("🔥 Сложная · 15", "difficulty:hard"),
+        ]},
+        {"type": "buttons", "align": "center", "buttons": [
+            button("🛍 Магазин", "shop"),
+            button("📊 Статистика", "stats"),
+        ]},
+    ]}
+
+
+def shop_view(store: Store, user_id: int, game_id: str | None = None) -> dict:
+    coins = store.stats(user_id)[4]
+    owned = store.inventory(user_id)
+    blocks = [
+        {"type": "heading", "size": 2, "text": "🛍 Магазин расходников"},
+        {"type": "paragraph", "text": f"Ваш баланс: {coins} 🪙"},
+    ]
+    for key, product in ITEMS.items():
+        blocks.append({"type": "paragraph", "text": (
+            f"{product['icon']} {product['name']} · {product['price']} 🪙\n"
+            f"{product['description']}\nВ рюкзаке: {owned[key]}"
+        )})
+        blocks.append({"type": "buttons", "align": "left", "buttons": [
+            button(f"Купить за {product['price']} 🪙", f"buy:{key}:{game_id or '-'}", "primary")
+        ]})
+    blocks.append({"type": "buttons", "align": "center", "buttons": [
+        button("← К игре" if game_id else "← В меню", f"back:{game_id}" if game_id else "menu")
+    ]})
+    return {"blocks": blocks}
 
 
 def load_asset(path: str) -> Image.Image:
@@ -280,7 +412,8 @@ def render_scene(game: dict) -> bytes:
     return output.getvalue()
 
 
-def game_view(game: dict, graphical: bool = True) -> dict:
+def game_view(game: dict, graphical: bool = True, inventory: dict[str, int] | None = None) -> dict:
+    inventory = inventory or {key: 0 for key in ITEMS}
     dog_cells = [{
         "text": {"type": "button", "button": button("🂠", "noop")},
         "align": "center", "valign": "middle",
@@ -307,9 +440,14 @@ def game_view(game: dict, graphical: bool = True) -> dict:
             "type": "photo",
             "photo": {"type": "photo", "media": "attach://dog_scene"},
         })
+    difficulty = DIFFICULTIES.get(game.get("difficulty", "easy"), DIFFICULTIES["easy"])
     blocks += [
         {"type": "heading", "size": 2, "text": f"{game['mood']} Сундучки с Псом"},
         {"type": "paragraph", "text": game["message"]},
+        {"type": "paragraph", "text": (
+            f"{difficulty['icon']} {difficulty['name']} · награда {difficulty['reward']} 🪙"
+            + ("\n🛡️ Следующий ход пса заблокирован." if game.get("shielded") else "")
+        )},
         {"type": "paragraph", "text": f"Карты пса · {len(game['dog'])} шт."},
         {"type": "table", "cells": [dog_cells[i:i+7] for i in range(0, len(dog_cells), 7)] or [[]],
          "is_bordered": True, "is_compact": True},
@@ -322,8 +460,15 @@ def game_view(game: dict, graphical: bool = True) -> dict:
         {"type": "paragraph", "text": f"Ваши карты · {len(game['player'])} шт. Нажмите карту, чтобы спросить её ранг."},
         {"type": "table", "cells": [player_cells[i:i+6] for i in range(0, len(player_cells), 6)] or [[]],
          "is_bordered": True, "is_compact": True},
+        {"type": "paragraph", "text": "🎒 Расходники"},
+        {"type": "buttons", "align": "center", "buttons": [
+            button(f"👃 Нюх ×{inventory['scent']}", f"use:{game['id']}:scent"),
+            button(f"🃏 Добор ×{inventory['double_draw']}", f"use:{game['id']}:double_draw"),
+            button(f"🛡️ Защита ×{inventory['shield']}", f"use:{game['id']}:shield"),
+        ]},
         {"type": "buttons", "align": "center", "buttons": [
             button("Новая игра", "new", "primary"),
+            button("Магазин", f"shop:{game['id']}"),
             button("Статистика", "stats"),
             button("Правила", "rules"),
         ]},
@@ -341,6 +486,7 @@ def main():
         {"command": "start", "description": "Играть в Сундучки с Псом"},
         {"command": "new", "description": "Новая игра"},
         {"command": "group", "description": "Запустить игру в группе"},
+        {"command": "shop", "description": "Магазин расходников"},
         {"command": "stats", "description": "Моя статистика"},
         {"command": "top", "description": "Рейтинг игроков"},
         {"command": "rating", "description": "Рейтинг игроков"},
@@ -359,9 +505,7 @@ def main():
                 offset = update["update_id"] + 1
                 if "inline_query" in update:
                     inline = update["inline_query"]
-                    game = new_game(inline["from"]["id"])
-                    store.save(game)
-                    api.answer_inline(inline["id"], game_view(game, False))
+                    api.answer_inline(inline["id"], difficulty_view())
                 elif "message" in update:
                     message = update["message"]
                     text = message.get("text", "").split("@", 1)[0]
@@ -371,20 +515,20 @@ def main():
                             "text": "Создатель бота — @eternall_dog\nПо всем вопросам и предложениям пишите ему.",
                         })
                     elif text == "/stats":
-                        wins, losses, streak, best = store.stats(message["from"]["id"])
+                        wins, losses, streak, best, coins = store.stats(message["from"]["id"])
                         api.call("sendMessage", {"chat_id": message["chat"]["id"],
-                            "text": f"Победы: {wins}\nПоражения: {losses}\nСерия: {streak}\nРекорд: {best}"})
+                            "text": f"Победы: {wins}\nПоражения: {losses}\nСерия: {streak}\nРекорд: {best}\nМонеты: {coins} 🪙"})
+                    elif text == "/shop":
+                        api.send_rich(message["chat"]["id"], shop_view(store, message["from"]["id"]))
                     elif text in {"/top", "/rating"}:
                         rows = store.leaders()
                         listing = "\n".join(
-                            f"{index}. Игрок {uid} — {wins} побед"
-                            for index, (uid, wins, _) in enumerate(rows, 1)
+                            f"{index}. Игрок {uid} — {wins} побед · {coins} 🪙"
+                            for index, (uid, wins, _, coins) in enumerate(rows, 1)
                         ) or "Пока результатов нет."
                         api.call("sendMessage", {"chat_id": message["chat"]["id"], "text": "🏆 Рейтинг\n" + listing})
                     elif text in {"/start", "/new", "/group"}:
-                        game = new_game(message["from"]["id"])
-                        store.save(game)
-                        api.send_rich(message["chat"]["id"], game_view(game), render_scene(game))
+                        api.send_rich(message["chat"]["id"], difficulty_view())
                 elif "callback_query" in update:
                     query = update["callback_query"]
                     data = query["data"]
@@ -399,15 +543,85 @@ def main():
                         api.answer(query["id"], "Нажмите свой ранг. Соберите больше наборов из четырёх карт.", True)
                         continue
                     if data == "stats":
-                        wins, losses, streak, best = store.stats(query["from"]["id"])
-                        api.answer(query["id"], f"Победы {wins} · Поражения {losses} · Серия {streak} · Рекорд {best}", True)
+                        wins, losses, streak, best, coins = store.stats(query["from"]["id"])
+                        api.answer(query["id"], f"Победы {wins} · Поражения {losses} · Серия {streak} · Рекорд {best} · {coins} 🪙", True)
                         continue
-                    if data == "new":
-                        game = new_game(query["from"]["id"])
-                    else:
-                        _, game_id, wanted = data.split(":")
+                    user_id = query["from"]["id"]
+                    if data in {"new", "menu"}:
+                        api.answer(query["id"])
+                        api.edit_rich(chat_id, message_id, difficulty_view(), inline_id)
+                        continue
+                    if data == "shop" or data.startswith("shop:"):
+                        game_id = data.partition(":")[2] or None
+                        api.answer(query["id"])
+                        api.edit_rich(chat_id, message_id, shop_view(store, user_id, game_id), inline_id)
+                        continue
+                    if data.startswith("buy:"):
+                        _, item, game_id = data.split(":", 2)
+                        bought, notice = store.buy(user_id, item)
+                        game_id = None if game_id == "-" else game_id
+                        api.answer(query["id"], notice, not bought)
+                        api.edit_rich(chat_id, message_id, shop_view(store, user_id, game_id), inline_id)
+                        continue
+                    if data.startswith("back:"):
+                        game = store.get(data.split(":", 1)[1])
+                        if not game or game["uid"] != user_id:
+                            api.answer(query["id"], "Партия не найдена.", True)
+                            continue
+                        api.answer(query["id"])
+                        api.edit_rich(
+                            chat_id, message_id,
+                            game_view(game, not bool(inline_id), store.inventory(user_id)),
+                            inline_id, None if inline_id else render_scene(game),
+                        )
+                        continue
+                    if data.startswith("difficulty:"):
+                        difficulty = data.split(":", 1)[1]
+                        game = new_game(user_id, difficulty)
+                        store.save(game)
+                        api.answer(query["id"])
+                        api.edit_rich(
+                            chat_id, message_id,
+                            game_view(game, not bool(inline_id), store.inventory(user_id)),
+                            inline_id, None if inline_id else render_scene(game),
+                        )
+                        continue
+                    if data.startswith("use:"):
+                        _, game_id, item = data.split(":", 2)
                         game = store.get(game_id)
-                        if not game or game["uid"] != query["from"]["id"] or game["done"]:
+                        if not game or game["uid"] != user_id or game["done"]:
+                            api.answer(query["id"], "Эта партия недоступна.", True)
+                            continue
+                        if item == "scent" and not game["dog"]:
+                            api.answer(query["id"], "У пса сейчас нет карт.", True)
+                            continue
+                        if item == "double_draw" and not game["deck"]:
+                            api.answer(query["id"], "Колода уже пуста.", True)
+                            continue
+                        if item == "shield" and game.get("shielded"):
+                            api.answer(query["id"], "Защита уже активна.", True)
+                            continue
+                        if item not in ITEMS or not store.consume(user_id, item):
+                            api.answer(query["id"], "Такого расходника нет в рюкзаке.", True)
+                            continue
+                        if item == "scent":
+                            revealed = rank(random.choice(game["dog"]))
+                            game["message"] = f"👃 Нюх подсказывает: у пса есть ранг {revealed}."
+                            game["pose"] = 3
+                        elif item == "double_draw":
+                            drawn = []
+                            for _ in range(min(2, len(game["deck"]))):
+                                drawn.append(game["deck"].pop())
+                            game["player"] += drawn
+                            game["player_books"] += take_books(game["player"])
+                            game["message"] = f"🃏 Двойной добор: получено {len(drawn)} карты."
+                        else:
+                            game["shielded"] = True
+                            game["message"] = "🛡️ Защита активна: следующий ход пса будет отменён."
+                    elif data.startswith("ask:"):
+                        _, game_id, wanted = data.split(":", 2)
+                        game = store.get(game_id)
+                        if not game or game["uid"] != user_id or game["done"]:
                             api.answer(query["id"], "Эта партия недоступна.", True)
                             continue
                         if wanted not in {rank(card) for card in game["player"]}:
@@ -428,12 +642,20 @@ def main():
                             game["mood"] = "😄"
                             game["pose"] = 4
                         game["player_books"] += take_books(game["player"])
-                        dog_turn(game)
+                        if game.get("shielded"):
+                            game["shielded"] = False
+                            game["message"] += "\n🛡️ Защита отменила ход пса."
+                        else:
+                            dog_turn(game)
+                    else:
+                        api.answer(query["id"], "Неизвестная кнопка.", True)
+                        continue
                     finish_if_needed(game, store)
                     store.save(game)
                     api.answer(query["id"])
                     api.edit_rich(
-                        chat_id, message_id, game_view(game, not bool(inline_id)), inline_id,
+                        chat_id, message_id,
+                        game_view(game, not bool(inline_id), store.inventory(user_id)), inline_id,
                         None if inline_id else render_scene(game),
                     )
         except Exception as error:
