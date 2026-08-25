@@ -96,7 +96,7 @@ def main():
      if txt=="/start":
       g=new_game(m["from"]["id"]);store.save(g);api.multipart("sendPhoto",{"chat_id":m["chat"]["id"],"caption":caption(g),"reply_markup":markup(g)},scene(g["pose"]))
     elif "callback_query" in u:
-     q=u["callback_query"];data=q["data"];api.call("answerCallbackQuery",{"callback_query_id":q["id"]})
+     q=u["callback_query"];data=q["data"]
      if data=="new": g=new_game(q["from"]["id"])
      elif data=="stats":
       r=store.db.execute("SELECT wins,losses,streak,best FROM stats WHERE user_id=?",(q["from"]["id"],)).fetchone() or (0,0,0,0)
@@ -111,6 +111,7 @@ def main():
        if drawn:g["p"].append(drawn)
        g["m"]=f"Нет {r}. Рыбачьте!";g["pose"]=4
       g["pb"]+=books(g["p"]);dog_turn(g)
+     api.call("answerCallbackQuery",{"callback_query_id":q["id"]})
      check(g,store);store.save(g)
      media=json.dumps({"type":"photo","media":"attach://photo","caption":caption(g)},ensure_ascii=False)
      api.multipart("editMessageMedia",{"chat_id":q["message"]["chat"]["id"],"message_id":q["message"]["message_id"],"media":media,"reply_markup":markup(g)},scene(g["pose"]))
