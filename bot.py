@@ -10,13 +10,18 @@ import urllib.error
 import urllib.request
 import uuid
 from collections import Counter
+from io import BytesIO
+
+from PIL import Image, ImageDraw, ImageFont
 
 RANKS = ["6", "7", "8", "9", "10", "J", "Q", "K", "A"]
 SUITS = [("S", "♠"), ("H", "♥"), ("D", "♦"), ("C", "♣")]
 ALL_CARDS = [rank + code for rank in RANKS for code, _ in SUITS]
 CARD_BASES = {"S": 0x1F0A0, "H": 0x1F0B0, "D": 0x1F0C0, "C": 0x1F0D0}
 CARD_VALUES = {"A": 1, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "J": 11, "Q": 13, "K": 14}
-ASSETS = os.path.join(os.path.dirname(__file__), "assets", "dog")
+RANK_NAMES = {"A": "Туз", "K": "Король", "Q": "Дама", "J": "Валет"}
+ASSET_ROOT = os.path.join(os.path.dirname(__file__), "assets")
+ASSETS = os.path.join(ASSET_ROOT, "dog")
 
 
 class API:
@@ -45,7 +50,7 @@ class API:
             if isinstance(value, (dict, list)):
                 value = json.dumps(value, ensure_ascii=False)
             body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode())
-        body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"dog_scene\"; filename=\"dog.png\"\r\nContent-Type: image/png\r\n\r\n".encode())
+        body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"dog_scene\"; filename=\"scene.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".encode())
         body.extend(image)
         body.extend(f"\r\n--{boundary}--\r\n".encode())
         request = urllib.request.Request(
@@ -221,10 +226,46 @@ def card_label(card: str) -> str:
     return chr(CARD_BASES[card[-1]] + CARD_VALUES[rank(card)])
 
 
-def dog_image(game: dict) -> bytes:
-    path = os.path.join(ASSETS, f"{game.get('pose', 0)}.png.b64")
+def card_button_label(card: str) -> str:
+    value = rank(card)
+    return f"{card_label(card)} {RANK_NAMES.get(value, value)} {dict(SUITS)[card[-1]]}"
+
+
+def load_asset(path: str) -> Image.Image:
+    raw_path = path[:-4] if path.endswith(".b64") else path
+    if os.path.exists(raw_path):
+        return Image.open(raw_path).convert("RGBA")
     with open(path, encoding="ascii") as source:
-        return base64.b64decode(source.read())
+        return Image.open(BytesIO(base64.b64decode(source.read()))).convert("RGBA")
+
+
+def render_scene(game: dict) -> bytes:
+    canvas = load_asset(os.path.join(ASSET_ROOT, "table.png.b64")).resize((1280, 720))
+    dog = load_asset(os.path.join(ASSETS, f"{game.get('pose', 0)}.png.b64"))
+    dog.thumbnail((330, 410), Image.Resampling.NEAREST)
+    canvas.alpha_composite(dog, ((1280 - dog.width) // 2, 45))
+
+    hands = load_asset(os.path.join(ASSET_ROOT, "hands_blank.png.b64")).resize(
+        (1280, 720), Image.Resampling.LANCZOS
+    )
+    draw = ImageDraw.Draw(hands)
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    font = ImageFont.truetype(font_path, 42)
+    small = ImageFont.truetype(font_path, 22)
+    positions = [(294, 340), (400, 312), (510, 292), (630, 285), (752, 294), (870, 317), (982, 350)]
+    visible = sorted(game["player"], key=lambda item: (RANKS.index(rank(item)), item[-1]))[:7]
+    for card, (x, y) in zip(visible, positions):
+        value, suit = rank(card), dict(SUITS)[card[-1]]
+        color = "#c51f32" if card[-1] in {"H", "D"} else "#17151a"
+        draw.text((x, y), value, fill=color, font=font, anchor="mm", stroke_width=1, stroke_fill="white")
+        draw.text((x, y + 42), suit, fill=color, font=font, anchor="mm")
+    if len(game["player"]) > 7:
+        draw.rounded_rectangle((1110, 560, 1245, 625), 12, fill="#6e1026", outline="#f0c36a", width=3)
+        draw.text((1177, 592), f"+{len(game['player'])-7} карт", fill="white", font=small, anchor="mm")
+    canvas.alpha_composite(hands)
+    output = BytesIO()
+    canvas.convert("RGB").save(output, "JPEG", quality=88, optimize=True)
+    return output.getvalue()
 
 
 def game_view(game: dict, graphical: bool = True) -> dict:
@@ -240,7 +281,7 @@ def game_view(game: dict, graphical: bool = True) -> dict:
         style = "primary" if card[-1] in {"H", "D"} else "success"
         player_cells.append({
             "text": {"type": "button", "button": button(
-                card_label(card), f"ask:{game['id']}:{rank(card)}", style
+                card_button_label(card), f"ask:{game['id']}:{rank(card)}", style
             )},
             "align": "center", "valign": "middle",
         })
@@ -331,7 +372,7 @@ def main():
                     elif text in {"/start", "/new", "/group"}:
                         game = new_game(message["from"]["id"])
                         store.save(game)
-                        api.send_rich(message["chat"]["id"], game_view(game), dog_image(game))
+                        api.send_rich(message["chat"]["id"], game_view(game), render_scene(game))
                 elif "callback_query" in update:
                     query = update["callback_query"]
                     data = query["data"]
@@ -381,7 +422,7 @@ def main():
                     api.answer(query["id"])
                     api.edit_rich(
                         chat_id, message_id, game_view(game, not bool(inline_id)), inline_id,
-                        None if inline_id else dog_image(game),
+                        None if inline_id else render_scene(game),
                     )
         except Exception as error:
             print(type(error).__name__, error)
