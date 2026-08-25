@@ -28,6 +28,11 @@ class GameTests(unittest.TestCase):
         self.assertEqual(bot.card_label("AS"), "🂡")
         self.assertEqual(bot.card_label("KH"), "🂾")
 
+    def test_scene_supports_twelve_visible_cards(self):
+        game = bot.new_game(1)
+        game["player"] = bot.ALL_CARDS[:12]
+        self.assertGreater(len(bot.render_scene(game)), 50000)
+
 
 if __name__ == "__main__":
     unittest.main()
