@@ -253,16 +253,26 @@ def render_scene(game: dict) -> bytes:
     font = ImageFont.truetype(font_path, 42)
     small = ImageFont.truetype(font_path, 22)
     positions = [(294, 340), (400, 312), (510, 292), (630, 285), (752, 294), (870, 317), (982, 350)]
-    visible = sorted(game["player"], key=lambda item: (RANKS.index(rank(item)), item[-1]))[:7]
-    for card, (x, y) in zip(visible, positions):
+    visible = sorted(game["player"], key=lambda item: (RANKS.index(rank(item)), item[-1]))[:12]
+    for card, (x, y) in zip(visible[:7], positions):
         value, suit = rank(card), dict(SUITS)[card[-1]]
         color = "#c51f32" if card[-1] in {"H", "D"} else "#17151a"
         draw.text((x, y), value, fill=color, font=font, anchor="mm", stroke_width=1, stroke_fill="white")
         draw.text((x, y + 42), suit, fill=color, font=font, anchor="mm")
-    if len(game["player"]) > 7:
-        draw.rounded_rectangle((1110, 560, 1245, 625), 12, fill="#6e1026", outline="#f0c36a", width=3)
-        draw.text((1177, 592), f"+{len(game['player'])-7} карт", fill="white", font=small, anchor="mm")
     canvas.alpha_composite(hands)
+    scene_draw = ImageDraw.Draw(canvas)
+    extra_positions = [(410 + index * 116, 515) for index in range(5)]
+    for card, (x, y) in zip(visible[7:12], extra_positions):
+        color = "#c51f32" if card[-1] in {"H", "D"} else "#17151a"
+        scene_draw.rounded_rectangle(
+            (x - 43, y - 60, x + 43, y + 60), 9,
+            fill="#fffaf0", outline="#6d4a2f", width=3,
+        )
+        scene_draw.text((x, y - 17), rank(card), fill=color, font=font, anchor="mm")
+        scene_draw.text((x, y + 29), dict(SUITS)[card[-1]], fill=color, font=font, anchor="mm")
+    if len(game["player"]) > 12:
+        scene_draw.rounded_rectangle((1080, 565, 1245, 630), 12, fill="#6e1026", outline="#f0c36a", width=3)
+        scene_draw.text((1162, 597), f"+{len(game['player'])-12} карт", fill="white", font=small, anchor="mm")
     output = BytesIO()
     canvas.convert("RGB").save(output, "JPEG", quality=88, optimize=True)
     return output.getvalue()
@@ -308,7 +318,7 @@ def game_view(game: dict, graphical: bool = True) -> dict:
             f"⏱ {elapsed // 60}:{elapsed % 60:02d}"
         )},
         {"type": "paragraph", "text": f"Ваши карты · {len(game['player'])} шт. Нажмите карту, чтобы спросить её ранг."},
-        {"type": "table", "cells": [player_cells[i:i+7] for i in range(0, len(player_cells), 7)] or [[]],
+        {"type": "table", "cells": [player_cells[i:i+6] for i in range(0, len(player_cells), 6)] or [[]],
          "is_bordered": True, "is_compact": True},
         {"type": "buttons", "align": "center", "buttons": [
             button("Новая игра", "new", "primary"),
