@@ -8,12 +8,15 @@ class GameTests(unittest.TestCase):
         self.assertEqual(len(bot.ALL_CARDS), 36)
         self.assertEqual(len(set(bot.ALL_CARDS)), 36)
 
-    def test_every_card_is_a_button(self):
+    def test_initial_hands_have_seven_clickable_cards(self):
         game = bot.new_game(1)
-        table = next(block for block in bot.game_view(game)["blocks"] if block["type"] == "table")
-        self.assertEqual(len(table["cells"]), 4)
-        self.assertTrue(all(len(row) == 9 for row in table["cells"]))
-        self.assertEqual(sum(len(row) for row in table["cells"]), 36)
+        tables = [block for block in bot.game_view(game)["blocks"] if block["type"] == "table"]
+        self.assertEqual(len(game["player"]), 7)
+        self.assertEqual(len(game["dog"]), 7)
+        self.assertEqual(sum(len(row) for row in tables[0]["cells"]), 7)
+        self.assertEqual(sum(len(row) for row in tables[1]["cells"]), 7)
+        callbacks = [cell["text"]["button"]["callback_data"] for row in tables[1]["cells"] for cell in row]
+        self.assertTrue(all(value.startswith("ask:") for value in callbacks))
 
     def test_cards_are_conserved(self):
         game = bot.new_game(1)
