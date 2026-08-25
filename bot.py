@@ -37,9 +37,21 @@ class API:
     def send_rich(self, chat_id: int, view: dict):
         return self.call("sendRichMessage", {"chat_id": chat_id, "rich_message": view})
 
-    def edit_rich(self, chat_id: int, message_id: int, view: dict):
-        return self.call("editMessageText", {
-            "chat_id": chat_id, "message_id": message_id, "rich_message": view
+    def edit_rich(self, chat_id: int, message_id: int, view: dict, inline_id: str | None = None):
+        data = {"rich_message": view}
+        if inline_id:
+            data["inline_message_id"] = inline_id
+        else:
+            data.update({"chat_id": chat_id, "message_id": message_id})
+        return self.call("editMessageText", data)
+
+    def answer_inline(self, query_id: str, view: dict):
+        return self.call("answerInlineQuery", {
+            "inline_query_id": query_id, "cache_time": 0, "is_personal": True,
+            "results": [{"type": "article", "id": uuid.uuid4().hex[:12],
+                "title": "Играть с Карточным Псом",
+                "description": "Go Fish — 7 карт в руке",
+                "input_message_content": {"rich_message": view}}],
         })
 
     def answer(self, query_id: str, text: str = "", alert: bool = False):
@@ -87,6 +99,11 @@ class Store:
             "SELECT wins,losses,streak,best FROM stats WHERE user_id=?", (user_id,)
         ).fetchone() or (0, 0, 0, 0)
 
+    def leaders(self):
+        return self.db.execute(
+            "SELECT user_id,wins,best FROM stats ORDER BY wins DESC,best DESC LIMIT 10"
+        ).fetchall()
+
 
 def rank(card: str) -> str:
     return card[:-1]
@@ -122,7 +139,7 @@ def new_game(user_id: int) -> dict:
         "done": False,
         "started": int(time.time()),
     }
-    for _ in range(6):
+    for _ in range(7):
         game["player"].append(game["deck"].pop())
         game["dog"].append(game["deck"].pop())
     game["player_books"] += take_books(game["player"])
@@ -178,40 +195,41 @@ def card_label(card: str) -> str:
 
 
 def game_view(game: dict) -> dict:
-    cells = []
-    player = set(game["player"])
-    player_books = set(game["player_books"])
-    dog_books = set(game["dog_books"])
-    for suit_code, suit_symbol in SUITS:
-        row = []
-        for value in RANKS:
-            card = value + suit_code
-            if card in player:
-                text = card_label(card)
-                style = "primary" if suit_code in {"H", "D"} else "success"
-                data = f"ask:{game['id']}:{value}"
-            elif value in player_books:
-                text, style, data = "✓" + value + suit_symbol, "success", "noop"
-            elif value in dog_books:
-                text, style, data = "🐾", None, "noop"
-            else:
-                text, style, data = "🂠", None, "noop"
-            row.append({
-                "text": {"type": "button", "button": button(text, data, style)},
-                "align": "center", "valign": "middle",
-            })
-        cells.append(row)
+    dog_cells = [{
+        "text": {"type": "button", "button": button("🂠", "noop")},
+        "align": "center", "valign": "middle",
+    } for _ in game["dog"]]
+    if not dog_cells:
+        dog_cells = [{"text": {"type": "button", "button": button("—", "noop")},
+                      "align": "center", "valign": "middle"}]
+    player_cells = []
+    for card in sorted(game["player"], key=lambda item: (RANKS.index(rank(item)), item[-1])):
+        style = "primary" if card[-1] in {"H", "D"} else "success"
+        player_cells.append({
+            "text": {"type": "button", "button": button(
+                card_label(card), f"ask:{game['id']}:{rank(card)}", style
+            )},
+            "align": "center", "valign": "middle",
+        })
+    if not player_cells:
+        player_cells = [{"text": {"type": "button", "button": button("—", "noop")},
+                         "align": "center", "valign": "middle"}]
     elapsed = max(0, int(time.time()) - game["started"])
     blocks = [
         {"type": "heading", "size": 2, "text": f"{game['mood']} Карточный Пёс"},
         {"type": "paragraph", "text": game["message"]},
+        {"type": "paragraph", "text": f"Карты пса · {len(game['dog'])} шт."},
+        {"type": "table", "cells": [dog_cells[i:i+7] for i in range(0, len(dog_cells), 7)] or [[]],
+         "is_bordered": True, "is_compact": True},
         {"type": "paragraph", "text": (
-            f"Ваши карты: {len(game['player'])} · Наборы: {len(game['player_books'])}\n"
-            f"Карты пса: {len(game['dog'])} · Наборы: {len(game['dog_books'])}\n"
-            f"Колода: {len(game['deck'])} · Время: {elapsed // 60}:{elapsed % 60:02d}"
+            f"🂠 Колода: {len(game['deck'])}\n"
+            f"📚 Ваши наборы: {' '.join(game['player_books']) or '—'}\n"
+            f"🐾 Наборы пса: {' '.join(game['dog_books']) or '—'}\n"
+            f"⏱ {elapsed // 60}:{elapsed % 60:02d}"
         )},
-        {"type": "table", "cells": cells, "is_bordered": True, "is_compact": True},
-        {"type": "paragraph", "text": "Открытая карта — ваша. 🂠 — скрытая. ✓ — собранный набор. 🐾 — набор пса."},
+        {"type": "paragraph", "text": f"Ваши карты · {len(game['player'])} шт. Нажмите карту, чтобы спросить её ранг."},
+        {"type": "table", "cells": [player_cells[i:i+7] for i in range(0, len(player_cells), 7)] or [[]],
+         "is_bordered": True, "is_compact": True},
         {"type": "buttons", "align": "center", "buttons": [
             button("Новая игра", "new", "primary"),
             button("Статистика", "stats"),
@@ -227,20 +245,32 @@ def main():
         raise SystemExit("BOT_TOKEN required")
     api = API(token)
     store = Store(os.getenv("DATABASE_PATH", "cards.sqlite3"))
-    api.call("setMyCommands", {"commands": [
+    commands = [
         {"command": "start", "description": "Играть с Карточным Псом"},
+        {"command": "new", "description": "Новая игра"},
+        {"command": "group", "description": "Запустить игру в группе"},
+        {"command": "stats", "description": "Моя статистика"},
+        {"command": "top", "description": "Рейтинг игроков"},
+        {"command": "rating", "description": "Рейтинг игроков"},
         {"command": "creator", "description": "Создатель бота"},
-    ]})
+    ]
+    api.call("setMyCommands", {"commands": commands})
+    api.call("setMyCommands", {"commands": commands, "scope": {"type": "all_group_chats"}})
     offset = 0
     while True:
         try:
             updates = api.call("getUpdates", {
                 "offset": offset, "timeout": 30,
-                "allowed_updates": ["message", "callback_query"],
+                "allowed_updates": ["message", "callback_query", "inline_query"],
             }, 40)
             for update in updates:
                 offset = update["update_id"] + 1
-                if "message" in update:
+                if "inline_query" in update:
+                    inline = update["inline_query"]
+                    game = new_game(inline["from"]["id"])
+                    store.save(game)
+                    api.answer_inline(inline["id"], game_view(game))
+                elif "message" in update:
                     message = update["message"]
                     text = message.get("text", "").split("@", 1)[0]
                     if text == "/creator":
@@ -248,15 +278,28 @@ def main():
                             "chat_id": message["chat"]["id"],
                             "text": "Создатель бота — @eternall_dog\nПо всем вопросам и предложениям пишите ему.",
                         })
-                    elif text == "/start":
+                    elif text == "/stats":
+                        wins, losses, streak, best = store.stats(message["from"]["id"])
+                        api.call("sendMessage", {"chat_id": message["chat"]["id"],
+                            "text": f"Победы: {wins}\nПоражения: {losses}\nСерия: {streak}\nРекорд: {best}"})
+                    elif text in {"/top", "/rating"}:
+                        rows = store.leaders()
+                        listing = "\n".join(
+                            f"{index}. Игрок {uid} — {wins} побед"
+                            for index, (uid, wins, _) in enumerate(rows, 1)
+                        ) or "Пока результатов нет."
+                        api.call("sendMessage", {"chat_id": message["chat"]["id"], "text": "🏆 Рейтинг\n" + listing})
+                    elif text in {"/start", "/new", "/group"}:
                         game = new_game(message["from"]["id"])
                         store.save(game)
                         api.send_rich(message["chat"]["id"], game_view(game))
                 elif "callback_query" in update:
                     query = update["callback_query"]
                     data = query["data"]
-                    chat_id = query["message"]["chat"]["id"]
-                    message_id = query["message"]["message_id"]
+                    message = query.get("message")
+                    inline_id = query.get("inline_message_id")
+                    chat_id = message["chat"]["id"] if message else 0
+                    message_id = message["message_id"] if message else 0
                     if data == "noop":
                         api.answer(query["id"], "Эта карта пока скрыта.")
                         continue
@@ -295,7 +338,7 @@ def main():
                     finish_if_needed(game, store)
                     store.save(game)
                     api.answer(query["id"])
-                    api.edit_rich(chat_id, message_id, game_view(game))
+                    api.edit_rich(chat_id, message_id, game_view(game), inline_id)
         except Exception as error:
             print(type(error).__name__, error)
             time.sleep(3)
