@@ -245,38 +245,31 @@ def render_scene(game: dict) -> bytes:
     dog.thumbnail((330, 410), Image.Resampling.NEAREST)
     canvas.alpha_composite(dog, ((1280 - dog.width) // 2, 45))
 
-    hands = load_asset(os.path.join(ASSET_ROOT, "hands_only.webp.b64")).resize(
-        (1280, 720), Image.Resampling.LANCZOS
-    )
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    font = ImageFont.truetype(font_path, 34)
     small = ImageFont.truetype(font_path, 22)
     visible = sorted(game["player"], key=lambda item: (RANKS.index(rank(item)), item[-1]))[:12]
-    count = len(visible)
-    span = min(1040, 380 + max(0, count - 1) * 60)
-    max_angle = min(18, 8 + count * 0.85)
-    for index, card in enumerate(visible):
-        normal = 0 if count == 1 else index / (count - 1) * 2 - 1
-        center_x = 640 if count == 1 else 640 - span / 2 + index * span / (count - 1)
-        center_y = 385 - (1 - abs(normal)) * 100
-        angle = -normal * max_angle
+    count = max(7, len(visible))
+    asset_name = "hands_blank.png.b64" if count == 7 else f"fan_{count}.webp.b64"
+    hands = load_asset(os.path.join(ASSET_ROOT, asset_name)).resize(
+        (1280, 720), Image.Resampling.LANCZOS
+    )
+    layouts = {
+        7: [(294, 340), (400, 312), (510, 292), (630, 285), (752, 294), (870, 317), (982, 350)],
+        8: [(242, 288), (353, 242), (460, 220), (575, 219), (676, 211), (782, 217), (890, 238), (1012, 275)],
+        9: [(197, 311), (281, 267), (388, 231), (496, 217), (618, 216), (719, 218), (828, 222), (946, 247), (1062, 294)],
+        10: [(206, 284), (297, 245), (400, 220), (493, 200), (615, 193), (733, 197), (824, 209), (915, 228), (1014, 259), (1094, 307)],
+        11: [(181, 319), (256, 269), (349, 238), (436, 215), (518, 199), (637, 193), (753, 198), (838, 213), (921, 233), (1016, 265), (1090, 317)],
+        12: [(190, 330), (285, 288), (383, 259), (465, 241), (551, 232), (642, 231), (730, 234), (810, 243), (892, 260), (979, 284), (1050, 315), (1114, 355)],
+    }
+    font_size = 42 if count == 7 else max(28, 43 - (count - 7) * 3)
+    font = ImageFont.truetype(font_path, font_size)
+    draw = ImageDraw.Draw(hands)
+    for card, (x, y) in zip(visible, layouts[count]):
         value, suit = rank(card), dict(SUITS)[card[-1]]
         color = "#c51f32" if card[-1] in {"H", "D"} else "#17151a"
-        card_face = Image.new("RGBA", (160, 245), (0, 0, 0, 0))
-        card_draw = ImageDraw.Draw(card_face)
-        card_draw.rounded_rectangle(
-            (3, 3, 156, 241), 12, fill="#fffdf8", outline="#4e2d21", width=4,
-        )
-        card_draw.rounded_rectangle(
-            (8, 8, 151, 236), 9, outline="#e7cba6", width=2,
-        )
-        card_draw.text((19, 16), value, fill=color, font=font, stroke_width=1, stroke_fill="white")
-        card_draw.text((21, 57), suit, fill=color, font=font)
-        turned = card_face.rotate(angle, Image.Resampling.BICUBIC, expand=True)
-        canvas.alpha_composite(
-            turned,
-            (round(center_x - turned.width / 2), round(center_y - turned.height / 2)),
-        )
+        draw.text((x, y), value, fill=color, font=font, anchor="mm",
+                  stroke_width=1, stroke_fill="white")
+        draw.text((x, y + font_size), suit, fill=color, font=font, anchor="mm")
     canvas.alpha_composite(hands)
     if len(game["player"]) > 12:
         scene_draw = ImageDraw.Draw(canvas)
