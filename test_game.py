@@ -94,6 +94,23 @@ class GameTests(unittest.TestCase):
             self.assertGreater(len(api.image), 50000)
             self.assertEqual(view["blocks"][0]["photo"]["media"], "telegram-file-id")
 
+    def test_guest_query_uses_same_rich_message_as_inline_mode(self):
+        class FakeAPI(bot.API):
+            def __init__(self):
+                self.calls = []
+
+            def call(self, method, payload=None, timeout=45):
+                self.calls.append((method, payload))
+                return {"inline_message_id": "guest-message"}
+
+        api = FakeAPI()
+        view = bot.difficulty_view()
+        api.answer_guest("guest-query", view)
+        method, payload = api.calls[0]
+        self.assertEqual(method, "answerGuestQuery")
+        self.assertEqual(payload["guest_query_id"], "guest-query")
+        self.assertEqual(payload["result"]["input_message_content"]["rich_message"], view)
+
 
 if __name__ == "__main__":
     unittest.main()
