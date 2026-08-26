@@ -100,13 +100,25 @@ class API:
             data.update({"chat_id": chat_id, "message_id": message_id})
         return self.multipart("editMessageText", data, image) if image else self.call("editMessageText", data)
 
+    def inline_result(self, view: dict) -> dict:
+        return {
+            "type": "article",
+            "id": uuid.uuid4().hex[:12],
+            "title": "Играть в Сундучки с Псом",
+            "description": "Сундучки — 7 карт в руке",
+            "input_message_content": {"rich_message": view},
+        }
+
     def answer_inline(self, query_id: str, view: dict):
         return self.call("answerInlineQuery", {
             "inline_query_id": query_id, "cache_time": 0, "is_personal": True,
-            "results": [{"type": "article", "id": uuid.uuid4().hex[:12],
-                "title": "Играть в Сундучки с Псом",
-                "description": "Сундучки — 7 карт в руке",
-                "input_message_content": {"rich_message": view}}],
+            "results": [self.inline_result(view)],
+        })
+
+    def answer_guest(self, guest_query_id: str, view: dict):
+        return self.call("answerGuestQuery", {
+            "guest_query_id": guest_query_id,
+            "result": self.inline_result(view),
         })
 
     def answer(self, query_id: str, text: str = "", alert: bool = False):
@@ -533,13 +545,20 @@ def main():
         try:
             updates = api.call("getUpdates", {
                 "offset": offset, "timeout": 30,
-                "allowed_updates": ["message", "callback_query", "inline_query"],
+                "allowed_updates": ["message", "callback_query", "inline_query", "guest_message"],
             }, 40)
             for update in updates:
                 offset = update["update_id"] + 1
                 if "inline_query" in update:
                     inline = update["inline_query"]
                     api.answer_inline(inline["id"], difficulty_view())
+                elif "guest_message" in update:
+                    guest = update["guest_message"]
+                    guest_query_id = guest.get("guest_query_id")
+                    if guest_query_id:
+                        # Guest Mode lets a user summon the game in a group even
+                        # when the bot itself has not been added to that chat.
+                        api.answer_guest(guest_query_id, difficulty_view())
                 elif "message" in update:
                     message = update["message"]
                     text = message.get("text", "").split("@", 1)[0]
