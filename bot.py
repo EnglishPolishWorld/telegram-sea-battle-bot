@@ -4,50 +4,24 @@ import base64
 import json
 import os
 import random
-import re
 import sqlite3
 import time
 import urllib.error
 import urllib.request
 import uuid
-from collections import Counter
 from io import BytesIO
 
 from PIL import Image, ImageDraw, ImageFont
 
-RANKS = ["6", "7", "8", "9", "10", "J", "Q", "K", "A"]
-SUITS = [("S", "♠"), ("H", "♥"), ("D", "♦"), ("C", "♣")]
-ALL_CARDS = [rank + code for rank in RANKS for code, _ in SUITS]
-CARD_BASES = {"S": 0x1F0A0, "H": 0x1F0B0, "D": 0x1F0C0, "C": 0x1F0D0}
-CARD_VALUES = {"A": 1, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "J": 11, "Q": 13, "K": 14}
-RANK_NAMES = {"A": "Туз", "K": "Король", "Q": "Дама", "J": "Валет"}
-ASSET_ROOT = os.path.join(os.path.dirname(__file__), "assets")
-ASSETS = os.path.join(ASSET_ROOT, "dog")
-DIFFICULTIES = {
-    "easy": {"name": "Лёгкая", "reward": 5, "icon": "🌱"},
-    "medium": {"name": "Средняя", "reward": 10, "icon": "🎯"},
-    "hard": {"name": "Сложная", "reward": 15, "icon": "🔥"},
+
+ROOT = os.path.dirname(__file__)
+AVATAR_B64 = os.path.join(ROOT, "assets", "naval", "avatar.jpg.b64")
+GAME_MODES = {
+    6: {"name": "Быстрый", "reward": 5, "ships": [3, 2, 2, 1, 1], "icon": "🌊"},
+    8: {"name": "Морской", "reward": 10, "ships": [4, 3, 3, 2, 2, 1, 1], "icon": "⚓"},
+    10: {"name": "Адмирал", "reward": 15, "ships": [4, 3, 3, 2, 2, 2, 1, 1, 1, 1], "icon": "🫡"},
 }
-ITEMS = {
-    "scent": {
-        "name": "Нюх",
-        "icon": "👃",
-        "price": 10,
-        "description": "Показывает один ранг, который есть у пса.",
-    },
-    "double_draw": {
-        "name": "Двойной добор",
-        "icon": "🃏",
-        "price": 15,
-        "description": "Берёт две карты из колоды без хода пса.",
-    },
-    "shield": {
-        "name": "Защита",
-        "icon": "🛡️",
-        "price": 20,
-        "description": "Отменяет следующий ход пса.",
-    },
-}
+PROFILE_VERSION = "sea-battle-v1"
 
 
 class API:
@@ -57,7 +31,7 @@ class API:
     def call(self, method: str, payload: dict | None = None, timeout: int = 45):
         request = urllib.request.Request(
             self.base + method,
-            json.dumps(payload or {}).encode(),
+            json.dumps(payload or {}, ensure_ascii=False).encode(),
             {"Content-Type": "application/json"},
         )
         try:
@@ -74,16 +48,19 @@ class API:
         method: str,
         payload: dict,
         image: bytes,
-        file_field: str = "dog_scene",
+        file_field: str = "battle_scene",
         filename: str = "scene.jpg",
         content_type: str = "image/jpeg",
     ):
-        boundary = "----carddogboundary"
+        boundary = "----seabattledogboundary"
         body = bytearray()
         for name, value in payload.items():
             if isinstance(value, (dict, list)):
                 value = json.dumps(value, ensure_ascii=False)
-            body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode())
+            body.extend(
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+                f"{value}\r\n".encode()
+            )
         body.extend(
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; "
             f"filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n".encode()
@@ -91,7 +68,8 @@ class API:
         body.extend(image)
         body.extend(f"\r\n--{boundary}--\r\n".encode())
         request = urllib.request.Request(
-            self.base + method, bytes(body),
+            self.base + method,
+            bytes(body),
             {"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         with urllib.request.urlopen(request, timeout=60) as response:
@@ -104,26 +82,36 @@ class API:
         payload = {"chat_id": chat_id, "rich_message": view}
         return self.multipart("sendRichMessage", payload, image) if image else self.call("sendRichMessage", payload)
 
-    def edit_rich(self, chat_id: int, message_id: int, view: dict, inline_id: str | None = None, image: bytes | None = None):
-        data = {"rich_message": view}
+    def edit_rich(
+        self,
+        chat_id: int,
+        message_id: int,
+        view: dict,
+        inline_id: str | None = None,
+        image: bytes | None = None,
+    ):
+        payload = {"rich_message": view}
         if inline_id:
-            data["inline_message_id"] = inline_id
+            payload["inline_message_id"] = inline_id
         else:
-            data.update({"chat_id": chat_id, "message_id": message_id})
-        return self.multipart("editMessageText", data, image) if image else self.call("editMessageText", data)
+            payload.update({"chat_id": chat_id, "message_id": message_id})
+        return self.multipart("editMessageText", payload, image) if image else self.call("editMessageText", payload)
 
-    def inline_result(self, view: dict) -> dict:
+    @staticmethod
+    def inline_result(view: dict) -> dict:
         return {
             "type": "article",
             "id": uuid.uuid4().hex[:12],
-            "title": "Играть в Сундучки с Псом",
-            "description": "Сундучки — 7 карт в руке",
+            "title": "Морской бой с Псом",
+            "description": "Откройте огонь по флоту пса-капитана",
             "input_message_content": {"rich_message": view},
         }
 
     def answer_inline(self, query_id: str, view: dict):
         return self.call("answerInlineQuery", {
-            "inline_query_id": query_id, "cache_time": 0, "is_personal": True,
+            "inline_query_id": query_id,
+            "cache_time": 0,
+            "is_personal": True,
             "results": [self.inline_result(view)],
         })
 
@@ -134,10 +122,10 @@ class API:
         })
 
     def answer(self, query_id: str, text: str = "", alert: bool = False):
-        data = {"callback_query_id": query_id, "show_alert": alert}
+        payload = {"callback_query_id": query_id, "show_alert": alert}
         if text:
-            data["text"] = text
-        return self.call("answerCallbackQuery", data)
+            payload["text"] = text
+        return self.call("answerCallbackQuery", payload)
 
     def cache_photo(self, chat_id: int, image: bytes) -> str:
         message = self.multipart("sendPhoto", {
@@ -146,479 +134,318 @@ class API:
         }, image, "photo")
         file_id = message["photo"][-1]["file_id"]
         try:
-            self.call("deleteMessage", {
-                "chat_id": chat_id,
-                "message_id": message["message_id"],
-            })
+            self.call("deleteMessage", {"chat_id": chat_id, "message_id": message["message_id"]})
         except Exception as error:
-            print("cache photo cleanup:", type(error).__name__, error)
+            print("cache cleanup:", type(error).__name__, error)
         return file_id
-
-    def upload_static_sticker(self, user_id: int, image: bytes) -> str:
-        uploaded = self.multipart(
-            "uploadStickerFile",
-            {"user_id": user_id, "sticker_format": "static"},
-            image,
-            "sticker",
-            "card.png",
-            "image/png",
-        )
-        return uploaded["file_id"]
-
-    def install_card_emoji(self, user_id: int, bot_username: str) -> tuple[str, dict[str, str]]:
-        clean_username = re.sub(r"_+", "_", re.sub(r"[^a-zA-Z0-9_]", "", bot_username)).lower()
-        suffix = f"_by_{clean_username}"
-        prefix = f"dogcards_{user_id}"[:64 - len(suffix)].rstrip("_")
-        set_name = prefix + suffix
-        try:
-            sticker_set = self.call("getStickerSet", {"name": set_name})
-        except RuntimeError as error:
-            if "STICKERSET_INVALID" not in str(error):
-                raise
-            uploaded = []
-            for card in ALL_CARDS:
-                uploaded.append({
-                    "sticker": self.upload_static_sticker(user_id, render_card_emoji(card)),
-                    "format": "static",
-                    "emoji_list": [card_label(card)],
-                    "keywords": [card, rank(card)],
-                })
-            self.call("createNewStickerSet", {
-                "user_id": user_id,
-                "name": set_name,
-                "title": "Пиксельные карты Сундучков",
-                "stickers": uploaded,
-                "sticker_type": "custom_emoji",
-            }, 120)
-            sticker_set = self.call("getStickerSet", {"name": set_name})
-        stickers = sticker_set.get("stickers", [])
-        if len(stickers) < len(ALL_CARDS):
-            raise RuntimeError("В наборе Telegram меньше 36 карт")
-        mapping = {
-            card: sticker["custom_emoji_id"]
-            for card, sticker in zip(ALL_CARDS, stickers)
-            if sticker.get("custom_emoji_id")
-        }
-        if len(mapping) != len(ALL_CARDS):
-            raise RuntimeError("Telegram не вернул ID всех 36 custom emoji")
-        return set_name, mapping
 
 
 class Store:
     def __init__(self, path: str):
         self.db = sqlite3.connect(path)
         self.db.execute(
-            "CREATE TABLE IF NOT EXISTS games(id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,state TEXT NOT NULL)"
+            "CREATE TABLE IF NOT EXISTS naval_games("
+            "id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,state TEXT NOT NULL)"
         )
         self.db.execute(
-            "CREATE TABLE IF NOT EXISTS stats(user_id INTEGER PRIMARY KEY,wins INTEGER DEFAULT 0,"
-            "losses INTEGER DEFAULT 0,streak INTEGER DEFAULT 0,best INTEGER DEFAULT 0)"
-        )
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(stats)")}
-        if "coins" not in columns:
-            self.db.execute("ALTER TABLE stats ADD COLUMN coins INTEGER DEFAULT 0")
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS inventory("
-            "user_id INTEGER NOT NULL,item TEXT NOT NULL,quantity INTEGER DEFAULT 0,"
-            "PRIMARY KEY(user_id,item))"
+            "CREATE TABLE IF NOT EXISTS naval_stats("
+            "user_id INTEGER PRIMARY KEY,wins INTEGER DEFAULT 0,losses INTEGER DEFAULT 0,"
+            "streak INTEGER DEFAULT 0,best INTEGER DEFAULT 0,coins INTEGER DEFAULT 0,"
+            "shots INTEGER DEFAULT 0,hits INTEGER DEFAULT 0)"
         )
         self.db.execute(
-            "CREATE TABLE IF NOT EXISTS card_emoji("
-            "card TEXT PRIMARY KEY,custom_emoji_id TEXT NOT NULL)"
+            "CREATE TABLE IF NOT EXISTS naval_settings("
+            "key TEXT PRIMARY KEY,value TEXT NOT NULL)"
         )
         self.db.commit()
 
-    def ensure_user(self, user_id: int):
-        self.db.execute("INSERT OR IGNORE INTO stats(user_id) VALUES(?)", (user_id,))
-
     def save(self, game: dict):
         self.db.execute(
-            "INSERT OR REPLACE INTO games VALUES(?,?,?)",
+            "INSERT OR REPLACE INTO naval_games(id,user_id,state) VALUES(?,?,?)",
             (game["id"], game["uid"], json.dumps(game)),
         )
         self.db.commit()
 
-    def get(self, game_id: str):
-        row = self.db.execute("SELECT state FROM games WHERE id=?", (game_id,)).fetchone()
+    def get(self, game_id: str) -> dict | None:
+        row = self.db.execute(
+            "SELECT state FROM naval_games WHERE id=?", (game_id,)
+        ).fetchone()
         return json.loads(row[0]) if row else None
 
-    def record(self, user_id: int, won: bool, reward: int = 0):
-        self.ensure_user(user_id)
+    def stats(self, user_id: int) -> tuple[int, int, int, int, int, int, int]:
+        return self.db.execute(
+            "SELECT wins,losses,streak,best,coins,shots,hits FROM naval_stats WHERE user_id=?",
+            (user_id,),
+        ).fetchone() or (0, 0, 0, 0, 0, 0, 0)
+
+    def record(self, game: dict, won: bool):
+        user_id = game["uid"]
+        reward = GAME_MODES[game["size"]]["reward"] if won else 0
+        shots = len(game["player_shots"])
+        hits = sum(index in fleet_cells(game["enemy_ships"]) for index in game["player_shots"])
+        self.db.execute("INSERT OR IGNORE INTO naval_stats(user_id) VALUES(?)", (user_id,))
         self.db.execute(
-            "UPDATE stats SET wins=wins+?,losses=losses+?,"
+            "UPDATE naval_stats SET wins=wins+?,losses=losses+?,"
             "streak=CASE WHEN ? THEN streak+1 ELSE 0 END,"
             "best=MAX(best,CASE WHEN ? THEN streak+1 ELSE best END),"
-            "coins=coins+? WHERE user_id=?",
-            (int(won), int(not won), int(won), int(won), reward, user_id),
+            "coins=coins+?,shots=shots+?,hits=hits+? WHERE user_id=?",
+            (int(won), int(not won), int(won), int(won), reward, shots, hits, user_id),
         )
         self.db.commit()
-
-    def stats(self, user_id: int):
-        return self.db.execute(
-            "SELECT wins,losses,streak,best,coins FROM stats WHERE user_id=?", (user_id,)
-        ).fetchone() or (0, 0, 0, 0, 0)
-
-    def inventory(self, user_id: int) -> dict[str, int]:
-        owned = {key: 0 for key in ITEMS}
-        owned.update(dict(self.db.execute(
-            "SELECT item,quantity FROM inventory WHERE user_id=?", (user_id,)
-        ).fetchall()))
-        return owned
-
-    def buy(self, user_id: int, item: str) -> tuple[bool, str]:
-        product = ITEMS.get(item)
-        if not product:
-            return False, "Товар не найден."
-        self.ensure_user(user_id)
-        coins = self.stats(user_id)[4]
-        if coins < product["price"]:
-            return False, f"Не хватает {product['price'] - coins} монет."
-        self.db.execute(
-            "UPDATE stats SET coins=coins-? WHERE user_id=?",
-            (product["price"], user_id),
-        )
-        self.db.execute(
-            "INSERT INTO inventory(user_id,item,quantity) VALUES(?,?,1) "
-            "ON CONFLICT(user_id,item) DO UPDATE SET quantity=quantity+1",
-            (user_id, item),
-        )
-        self.db.commit()
-        return True, f"Куплено: {product['icon']} {product['name']}."
-
-    def consume(self, user_id: int, item: str) -> bool:
-        cursor = self.db.execute(
-            "UPDATE inventory SET quantity=quantity-1 "
-            "WHERE user_id=? AND item=? AND quantity>0",
-            (user_id, item),
-        )
-        self.db.commit()
-        return cursor.rowcount == 1
 
     def leaders(self):
         return self.db.execute(
-            "SELECT user_id,wins,best,coins FROM stats ORDER BY wins DESC,best DESC LIMIT 10"
+            "SELECT user_id,wins,best,coins FROM naval_stats "
+            "ORDER BY wins DESC,best DESC LIMIT 10"
         ).fetchall()
 
-    def card_emoji(self) -> dict[str, str]:
-        return dict(self.db.execute(
-            "SELECT card,custom_emoji_id FROM card_emoji"
-        ).fetchall())
+    def setting(self, key: str) -> str | None:
+        row = self.db.execute("SELECT value FROM naval_settings WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
 
-    def save_card_emoji(self, mapping: dict[str, str]):
-        self.db.executemany(
-            "INSERT OR REPLACE INTO card_emoji(card,custom_emoji_id) VALUES(?,?)",
-            mapping.items(),
+    def set_setting(self, key: str, value: str):
+        self.db.execute(
+            "INSERT OR REPLACE INTO naval_settings(key,value) VALUES(?,?)", (key, value)
         )
         self.db.commit()
 
 
-def rank(card: str) -> str:
-    return card[:-1]
-
-
-def take_books(hand: list[str]) -> list[str]:
-    counts = Counter(rank(card) for card in hand)
-    made = [value for value, count in counts.items() if count == 4]
-    hand[:] = [card for card in hand if rank(card) not in made]
-    return made
-
-
-def refill(game: dict):
-    for key in ("player", "dog"):
-        if not game[key] and game["deck"]:
-            for _ in range(min(6, len(game["deck"]))):
-                game[key].append(game["deck"].pop())
-
-
-def new_game(user_id: int, difficulty: str = "easy") -> dict:
-    if difficulty not in DIFFICULTIES:
-        difficulty = "easy"
-    deck = ALL_CARDS.copy()
-    random.shuffle(deck)
-    game = {
-        "id": uuid.uuid4().hex[:10],
-        "uid": user_id,
-        "deck": deck,
-        "player": [],
-        "dog": [],
-        "player_books": [],
-        "dog_books": [],
-        "message": "Ваш ход: нажмите любую открытую карту.",
-        "mood": "🐶",
-        "pose": 0,
-        "difficulty": difficulty,
-        "shielded": False,
-        "done": False,
-        "started": int(time.time()),
-    }
-    for _ in range(7):
-        game["player"].append(game["deck"].pop())
-        game["dog"].append(game["deck"].pop())
-    game["player_books"] += take_books(game["player"])
-    game["dog_books"] += take_books(game["dog"])
-    return game
-
-
-def dog_turn(game: dict):
-    refill(game)
-    if not game["dog"] or not game["player"]:
-        return
-    counts = Counter(rank(card) for card in game["dog"])
-    difficulty = game.get("difficulty", "easy")
-    if difficulty == "hard":
-        player_ranks = {rank(card) for card in game["player"]}
-        known_hits = [value for value in counts if value in player_ranks]
-        wanted = max(known_hits, key=counts.get) if known_hits else max(counts, key=counts.get)
-    elif difficulty == "medium":
-        best_count = max(counts.values())
-        best_ranks = [value for value, amount in counts.items() if amount == best_count]
-        wanted = random.choice(best_ranks)
-    else:
-        wanted = rank(random.choice(game["dog"]))
-    received = [card for card in game["player"] if rank(card) == wanted]
-    if received:
-        game["player"] = [card for card in game["player"] if rank(card) != wanted]
-        game["dog"] += received
-        game["message"] += f"\n🐕 Пёс попросил {wanted} и забрал {len(received)}."
-        game["mood"] = "😏"
-        game["pose"] = 1
-    else:
-        if game["deck"]:
-            game["dog"].append(game["deck"].pop())
-        game["message"] += f"\n🐕 Пёс попросил {wanted}, но вытянул карту."
-        game["mood"] = "🐶"
-        game["pose"] = 2
-    game["dog_books"] += take_books(game["dog"])
-    refill(game)
-
-
-def finish_if_needed(game: dict, store: Store):
-    if game.get("done"):
-        return
-    if len(game["player_books"]) + len(game["dog_books"]) == 9 or (
-        not game["deck"] and (not game["player"] or not game["dog"])
-    ):
-        won = len(game["player_books"]) > len(game["dog_books"])
-        game["done"] = True
-        game["mood"] = "😡" if won else "🥳"
-        game["pose"] = 6 if won else 7
-        reward = DIFFICULTIES.get(game.get("difficulty", "easy"), DIFFICULTIES["easy"])["reward"] if won else 0
-        game["message"] = (
-            f"{'Вы победили!' if won else 'Карточный Пёс победил!'} "
-            f"Счёт {len(game['player_books'])}:{len(game['dog_books'])}."
-            + (f" Награда: +{reward} монет 🪙" if reward else "")
-        )
-        store.record(game["uid"], won, reward)
-
-
-def button(text: str | dict | list, data: str, style: str | None = None) -> dict:
+def button(text: str, data: str, style: str | None = None) -> dict:
     result = {"text": text, "callback_data": data}
     if style:
         result["style"] = style
     return result
 
 
-def card_label(card: str) -> str:
-    return chr(CARD_BASES[card[-1]] + CARD_VALUES[rank(card)])
+def index_to_coord(index: int, size: int) -> str:
+    return f"{chr(1040 + index % size)}{index // size + 1}"
 
 
-def card_button_label(card: str) -> str:
-    value = rank(card)
-    return f"{card_label(card)} {RANK_NAMES.get(value, value)} {dict(SUITS)[card[-1]]}"
+def adjacent(index: int, size: int, diagonal: bool = False) -> list[int]:
+    row, column = divmod(index, size)
+    result = []
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            if not (dr or dc) or (not diagonal and abs(dr) + abs(dc) != 1):
+                continue
+            nr, nc = row + dr, column + dc
+            if 0 <= nr < size and 0 <= nc < size:
+                result.append(nr * size + nc)
+    return result
 
 
-def card_button_text(card: str, emoji_ids: dict[str, str]) -> str | list:
-    emoji_id = emoji_ids.get(card)
-    if not emoji_id:
-        return card_button_label(card)
-    return [
-        {
-            "type": "custom_emoji",
-            "custom_emoji_id": emoji_id,
-            "alternative_text": card_label(card),
-        },
-        f" {RANK_NAMES.get(rank(card), rank(card))}",
-    ]
+def place_fleet(size: int, lengths: list[int], rng=random) -> list[list[int]]:
+    for _ in range(200):
+        ships: list[list[int]] = []
+        occupied: set[int] = set()
+        for length in lengths:
+            choices = []
+            for vertical in (False, True):
+                max_row = size - length if vertical else size - 1
+                max_col = size - 1 if vertical else size - length
+                for row in range(max_row + 1):
+                    for column in range(max_col + 1):
+                        cells = [
+                            (row + offset if vertical else row) * size
+                            + (column if vertical else column + offset)
+                            for offset in range(length)
+                        ]
+                        halo = set(cells)
+                        for cell in cells:
+                            halo.update(adjacent(cell, size, True))
+                        if not occupied.intersection(halo):
+                            choices.append(cells)
+            if not choices:
+                break
+            ship = rng.choice(choices)
+            ships.append(ship)
+            occupied.update(ship)
+        if len(ships) == len(lengths):
+            return ships
+    raise RuntimeError("Не удалось расставить флот")
 
 
-def difficulty_view() -> dict:
+def fleet_cells(ships: list[list[int]]) -> set[int]:
+    return {cell for ship in ships for cell in ship}
+
+
+def ship_at(ships: list[list[int]], index: int) -> list[int] | None:
+    return next((ship for ship in ships if index in ship), None)
+
+
+def is_sunk(ship: list[int], shots: list[int]) -> bool:
+    return set(ship).issubset(shots)
+
+
+def afloat(ships: list[list[int]], shots: list[int]) -> int:
+    return sum(not is_sunk(ship, shots) for ship in ships)
+
+
+def new_game(user_id: int, size: int = 8) -> dict:
+    size = size if size in GAME_MODES else 8
+    mode = GAME_MODES[size]
+    return {
+        "id": uuid.uuid4().hex[:10],
+        "uid": user_id,
+        "size": size,
+        "player_ships": place_fleet(size, mode["ships"]),
+        "enemy_ships": place_fleet(size, mode["ships"]),
+        "player_shots": [],
+        "dog_shots": [],
+        "dog_targets": [],
+        "message": "Ваш ход, капитан. Выберите клетку для выстрела.",
+        "done": False,
+        "won": None,
+        "started": int(time.time()),
+    }
+
+
+def finish_if_needed(game: dict, store: Store) -> bool:
+    if game["done"]:
+        return True
+    enemy_destroyed = fleet_cells(game["enemy_ships"]).issubset(game["player_shots"])
+    player_destroyed = fleet_cells(game["player_ships"]).issubset(game["dog_shots"])
+    if not enemy_destroyed and not player_destroyed:
+        return False
+    won = enemy_destroyed
+    game["done"] = True
+    game["won"] = won
+    reward = GAME_MODES[game["size"]]["reward"] if won else 0
+    game["message"] = (
+        f"🏆 Флот пса уничтожен! Победа и +{reward} монет."
+        if won else "💀 Ваш флот уничтожен. Пёс-адмирал победил."
+    )
+    store.record(game, won)
+    return True
+
+
+def dog_fire(game: dict, rng=random) -> tuple[int, bool]:
+    size = game["size"]
+    fired = set(game["dog_shots"])
+    targets = game["dog_targets"]
+    while targets and targets[-1] in fired:
+        targets.pop()
+    if targets:
+        target = targets.pop()
+    else:
+        target = rng.choice([index for index in range(size * size) if index not in fired])
+    game["dog_shots"].append(target)
+    hit = target in fleet_cells(game["player_ships"])
+    if hit:
+        ship = ship_at(game["player_ships"], target)
+        if ship and not is_sunk(ship, game["dog_shots"]):
+            nearby = [cell for cell in adjacent(target, size) if cell not in game["dog_shots"]]
+            rng.shuffle(nearby)
+            targets.extend(nearby)
+    return target, hit
+
+
+def fire(game: dict, index: int, store: Store, rng=random) -> str:
+    size = game["size"]
+    if game["done"]:
+        return "Партия уже закончена."
+    if not 0 <= index < size * size or index in game["player_shots"]:
+        return "Эта клетка уже проверена."
+    game["player_shots"].append(index)
+    target_ship = ship_at(game["enemy_ships"], index)
+    hit = target_ship is not None
+    player_result = "попадание" if hit else "мимо"
+    if target_ship and is_sunk(target_ship, game["player_shots"]):
+        player_result = "корабль потоплен"
+    game["message"] = f"🎯 {index_to_coord(index, size)}: {player_result}!"
+    if finish_if_needed(game, store):
+        return game["message"]
+    dog_index, dog_hit = dog_fire(game, rng)
+    game["message"] += (
+        f"\n🐕 Пёс стреляет в {index_to_coord(dog_index, size)}: "
+        f"{'попал!' if dog_hit else 'мимо.'}"
+    )
+    finish_if_needed(game, store)
+    return game["message"]
+
+
+def menu_view() -> dict:
     return {"blocks": [
-        {"type": "heading", "size": 2, "text": "🐶 Сундучки с Псом"},
+        {"type": "heading", "size": 2, "text": "⚓ Морской бой с Псом"},
         {"type": "paragraph", "text": (
-            "Выберите сложность. Монеты выдаются только за победу:\n"
-            "🌱 Лёгкая — 5 🪙\n🎯 Средняя — 10 🪙\n🔥 Сложная — 15 🪙"
+            "Выберите размер моря. Корабли расставятся автоматически, "
+            "а каждое синее поле станет отдельной кликабельной клеткой."
         )},
         {"type": "buttons", "align": "center", "buttons": [
-            button("🌱 Лёгкая · 5", "difficulty:easy", "success"),
-            button("🎯 Средняя · 10", "difficulty:medium", "primary"),
-            button("🔥 Сложная · 15", "difficulty:hard"),
+            button("🌊 6×6 · +5", "size:6", "success"),
+            button("⚓ 8×8 · +10", "size:8", "primary"),
+            button("🫡 10×10 · +15", "size:10"),
         ]},
         {"type": "buttons", "align": "center", "buttons": [
-            button("🛍 Магазин", "shop"),
             button("📊 Статистика", "stats"),
+            button("📖 Правила", "rules"),
         ]},
     ]}
 
 
-def shop_view(store: Store, user_id: int, game_id: str | None = None) -> dict:
-    coins = store.stats(user_id)[4]
-    owned = store.inventory(user_id)
-    blocks = [
-        {"type": "heading", "size": 2, "text": "🛍 Магазин расходников"},
-        {"type": "paragraph", "text": f"Ваш баланс: {coins} 🪙"},
-    ]
-    for key, product in ITEMS.items():
-        blocks.append({"type": "paragraph", "text": (
-            f"{product['icon']} {product['name']} · {product['price']} 🪙\n"
-            f"{product['description']}\nВ рюкзаке: {owned[key]}"
-        )})
-        blocks.append({"type": "buttons", "align": "left", "buttons": [
-            button("Купить", f"buy:{key}:{game_id or '-'}", "primary")
-        ]})
-    blocks.append({"type": "buttons", "align": "center", "buttons": [
-        button("← К игре" if game_id else "← В меню", f"back:{game_id}" if game_id else "menu")
-    ]})
-    return {"blocks": blocks}
-
-
-def load_asset(path: str) -> Image.Image:
-    raw_path = path[:-4] if path.endswith(".b64") else path
-    if os.path.exists(raw_path):
-        return Image.open(raw_path).convert("RGBA")
-    with open(path, encoding="ascii") as source:
-        return Image.open(BytesIO(base64.b64decode(source.read()))).convert("RGBA")
-
-
-def render_card_emoji(card: str) -> bytes:
-    """Draw an exact 100x100 static Telegram custom emoji in crisp pixel art."""
-    value = rank(card)
-    suit = dict(SUITS)[card[-1]]
-    ink = "#d4263f" if card[-1] in {"H", "D"} else "#17141c"
-    tiny = Image.new("RGBA", (50, 50), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(tiny)
-    draw.rounded_rectangle((7, 3, 45, 49), 4, fill="#21172e")
-    draw.rounded_rectangle((4, 1, 42, 47), 4, fill="#fff7df", outline="#f1c65d", width=2)
-    draw.line((8, 5, 38, 5), fill="#fffdf4", width=1)
-    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    rank_font = ImageFont.truetype(font_path, 11 if value == "10" else 13)
-    suit_font = ImageFont.truetype(font_path, 16)
-    center_font = ImageFont.truetype(font_path, 22)
-    draw.text((8, 4), value, fill=ink, font=rank_font, stroke_width=1, stroke_fill="#fff7df")
-    draw.text((9, 16), suit, fill=ink, font=suit_font, anchor="ma")
-    draw.text((24, 30), suit, fill=ink, font=center_font, anchor="mm")
-    draw.text((39, 44), value, fill=ink, font=rank_font, anchor="rs",
-              stroke_width=1, stroke_fill="#fff7df")
-    emoji = tiny.resize((100, 100), Image.Resampling.NEAREST)
-    output = BytesIO()
-    emoji.save(output, "PNG", optimize=True)
-    return output.getvalue()
-
-
-def render_scene(game: dict) -> bytes:
-    canvas = load_asset(os.path.join(ASSET_ROOT, "table.png.b64")).resize((1280, 720))
-    dog = load_asset(os.path.join(ASSETS, f"{game.get('pose', 0)}.png.b64"))
-    dog.thumbnail((330, 410), Image.Resampling.NEAREST)
-    canvas.alpha_composite(dog, ((1280 - dog.width) // 2, 45))
-
-    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    small = ImageFont.truetype(font_path, 22)
-    visible = sorted(game["player"], key=lambda item: (RANKS.index(rank(item)), item[-1]))[:12]
-    count = max(7, len(visible))
-    asset_name = "hands_blank.png.b64" if count == 7 else f"fan_{count}.webp.b64"
-    hands = load_asset(os.path.join(ASSET_ROOT, asset_name)).resize(
-        (1280, 720), Image.Resampling.LANCZOS
-    )
-    layouts = {
-        7: [(294, 340), (400, 312), (510, 292), (630, 285), (752, 294), (870, 317), (982, 350)],
-        8: [(242, 288), (353, 242), (460, 220), (575, 219), (676, 211), (782, 217), (890, 238), (1012, 275)],
-        9: [(197, 311), (281, 267), (388, 231), (496, 217), (618, 216), (719, 218), (828, 222), (946, 247), (1062, 294)],
-        10: [(206, 284), (297, 245), (400, 220), (493, 200), (615, 193), (733, 197), (824, 209), (915, 228), (1014, 259), (1094, 307)],
-        11: [(181, 319), (256, 269), (349, 238), (436, 215), (518, 199), (637, 193), (753, 198), (838, 213), (921, 233), (1016, 265), (1090, 317)],
-        12: [(190, 330), (285, 288), (383, 259), (465, 241), (551, 232), (642, 231), (730, 234), (810, 243), (892, 260), (979, 284), (1050, 315), (1114, 355)],
-    }
-    font_size = 42 if count == 7 else max(28, 43 - (count - 7) * 3)
-    font = ImageFont.truetype(font_path, font_size)
-    draw = ImageDraw.Draw(hands)
-    for card, (x, y) in zip(visible, layouts[count]):
-        value, suit = rank(card), dict(SUITS)[card[-1]]
-        color = "#c51f32" if card[-1] in {"H", "D"} else "#17151a"
-        draw.text((x, y), value, fill=color, font=font, anchor="mm",
-                  stroke_width=1, stroke_fill="white")
-        draw.text((x, y + font_size), suit, fill=color, font=font, anchor="mm")
-    canvas.alpha_composite(hands)
-    if len(game["player"]) > 12:
-        scene_draw = ImageDraw.Draw(canvas)
-        scene_draw.rounded_rectangle((1080, 565, 1245, 630), 12, fill="#6e1026", outline="#f0c36a", width=3)
-        scene_draw.text((1162, 597), f"+{len(game['player'])-12} карт", fill="white", font=small, anchor="mm")
-    output = BytesIO()
-    canvas.convert("RGB").save(output, "JPEG", quality=88, optimize=True)
-    return output.getvalue()
-
-
-def game_view(
-    game: dict,
-    graphical: bool = True,
-    inventory: dict[str, int] | None = None,
-    photo_media: str | None = None,
-    emoji_ids: dict[str, str] | None = None,
-) -> dict:
-    inventory = inventory or {key: 0 for key in ITEMS}
-    emoji_ids = emoji_ids or {}
-    dog_cells = [{
-        "text": {"type": "button", "button": button("🂠", "noop")},
-        "align": "center", "valign": "middle",
-    } for _ in game["dog"]]
-    if not dog_cells:
-        dog_cells = [{"text": {"type": "button", "button": button("—", "noop")},
-                      "align": "center", "valign": "middle"}]
-    player_cells = []
-    for card in sorted(game["player"], key=lambda item: (RANKS.index(rank(item)), item[-1])):
-        style = None if card in emoji_ids else ("primary" if card[-1] in {"H", "D"} else "success")
-        player_cells.append({
-            "text": {"type": "button", "button": button(
-                card_button_text(card, emoji_ids), f"ask:{game['id']}:{rank(card)}", style
-            )},
-            "align": "center", "valign": "middle",
+def board_cells(game: dict, own: bool = False) -> list[list[dict]]:
+    size = game["size"]
+    shots = game["dog_shots"] if own else game["player_shots"]
+    ships = game["player_ships"] if own else game["enemy_ships"]
+    occupied = fleet_cells(ships)
+    cells = []
+    for index in range(size * size):
+        ship = ship_at(ships, index)
+        if own:
+            if index in shots and index in occupied:
+                label, style = "💥", "danger"
+            elif index in shots:
+                label, style = "·", None
+            elif index in occupied:
+                label, style = "▰", "success"
+            else:
+                label, style = "≈", "primary"
+            data = "noop"
+        elif index in shots and ship:
+            label = "☠" if is_sunk(ship, shots) else "💥"
+            style, data = "danger", "noop"
+        elif index in shots:
+            label, style, data = "·", None, "noop"
+        elif game["done"] and index in occupied:
+            label, style, data = "▰", "success", "noop"
+        else:
+            label, style, data = "≈", "primary", f"fire:{game['id']}:{index}"
+        cells.append({
+            "text": {"type": "button", "button": button(label, data, style)},
+            "align": "center",
+            "valign": "middle",
         })
-    if not player_cells:
-        player_cells = [{"text": {"type": "button", "button": button("—", "noop")},
-                         "align": "center", "valign": "middle"}]
+    return [cells[index:index + size] for index in range(0, len(cells), size)]
+
+
+def battle_view(game: dict, own: bool = False, photo_media: str | bool | None = None) -> dict:
+    mode = GAME_MODES[game["size"]]
     elapsed = max(0, int(time.time()) - game["started"])
+    enemy_left = afloat(game["enemy_ships"], game["player_shots"])
+    player_left = afloat(game["player_ships"], game["dog_shots"])
     blocks = []
-    if graphical:
+    if photo_media is not False:
         blocks.append({
             "type": "photo",
-            "photo": {"type": "photo", "media": photo_media or "attach://dog_scene"},
+            "photo": {"type": "photo", "media": photo_media or "attach://battle_scene"},
         })
-    difficulty = DIFFICULTIES.get(game.get("difficulty", "easy"), DIFFICULTIES["easy"])
     blocks += [
-        {"type": "heading", "size": 2, "text": f"{game['mood']} Сундучки с Псом"},
+        {"type": "heading", "size": 2, "text": "⚓ Морской бой с Псом"},
         {"type": "paragraph", "text": game["message"]},
         {"type": "paragraph", "text": (
-            f"{difficulty['icon']} {difficulty['name']} · награда {difficulty['reward']} 🪙"
-            + ("\n🛡️ Следующий ход пса заблокирован." if game.get("shielded") else "")
-        )},
-        {"type": "paragraph", "text": f"Карты пса · {len(game['dog'])} шт."},
-        {"type": "table", "cells": [dog_cells[i:i+7] for i in range(0, len(dog_cells), 7)] or [[]],
-         "is_bordered": True, "is_compact": True},
-        {"type": "paragraph", "text": (
-            f"🂠 Колода: {len(game['deck'])}\n"
-            f"📚 Ваши наборы: {' '.join(game['player_books']) or '—'}\n"
-            f"🐾 Наборы пса: {' '.join(game['dog_books']) or '—'}\n"
+            f"{mode['icon']} {mode['name']} {game['size']}×{game['size']} · награда {mode['reward']} 🪙\n"
+            f"Ваш флот: {player_left} 🚢 · Флот пса: {enemy_left} 🐾 · "
             f"⏱ {elapsed // 60}:{elapsed % 60:02d}"
         )},
-        {"type": "paragraph", "text": f"Ваши карты · {len(game['player'])} шт. Нажмите карту, чтобы спросить её ранг."},
-        {"type": "table", "cells": [player_cells[i:i+6] for i in range(0, len(player_cells), 6)] or [[]],
-         "is_bordered": True, "is_compact": True},
-        {"type": "paragraph", "text": "🎒 Расходники"},
         {"type": "buttons", "align": "center", "buttons": [
-            button(f"👃 Нюх ×{inventory['scent']}", f"use:{game['id']}:scent"),
-            button(f"🃏 Добор ×{inventory['double_draw']}", f"use:{game['id']}:double_draw"),
-            button(f"🛡️ Защита ×{inventory['shield']}", f"use:{game['id']}:shield"),
+            button("🎯 Поле противника", f"board:{game['id']}:enemy", "primary" if not own else None),
+            button("🛡 Мой флот", f"board:{game['id']}:own", "success" if own else None),
         ]},
+        {"type": "paragraph", "text": "Ваш флот" if own else "Выберите клетку для выстрела"},
+        {"type": "table", "cells": board_cells(game, own), "is_bordered": True, "is_compact": True},
+        {"type": "paragraph", "text": "Легенда: ≈ вода · ▰ корабль · 💥 попадание · ☠ потоплен"},
         {"type": "buttons", "align": "center", "buttons": [
             button("Новая игра", "new", "primary"),
-            button("Магазин", f"shop:{game['id']}"),
             button("Статистика", "stats"),
             button("Правила", "rules"),
         ]},
@@ -626,19 +453,88 @@ def game_view(
     return {"blocks": blocks}
 
 
-def prepared_game_view(api: API, store: Store, game: dict, inline_id: str | None):
-    inventory = store.inventory(game["uid"])
-    emoji_ids = store.card_emoji()
+def load_avatar() -> bytes:
+    with open(AVATAR_B64, encoding="ascii") as source:
+        return base64.b64decode(source.read())
+
+
+def render_scene(game: dict) -> bytes:
+    canvas = Image.new("RGB", (1280, 720), "#071a38")
+    draw = ImageDraw.Draw(canvas)
+    for y in range(720):
+        ratio = y / 719
+        color = (int(12 + 7 * ratio), int(47 + 70 * ratio), int(91 + 65 * ratio))
+        draw.line((0, y, 1280, y), fill=color)
+    for y in range(470, 720, 34):
+        for x in range(-40, 1280, 80):
+            draw.arc((x, y, x + 90, y + 38), 190, 350, fill="#53c7df", width=4)
+    avatar = Image.open(BytesIO(load_avatar())).convert("RGB").resize((430, 430))
+    canvas.paste(avatar, (800, 120))
+    draw.rounded_rectangle((790, 110, 1240, 570), 28, outline="#f5c85b", width=8)
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    title = ImageFont.truetype(font_path, 54)
+    large = ImageFont.truetype(font_path, 38)
+    medium = ImageFont.truetype(font_path, 28)
+    draw.text((55, 55), "МОРСКОЙ БОЙ", font=title, fill="#fff4c5", stroke_width=2, stroke_fill="#102953")
+    draw.text((58, 125), "с Псом-адмиралом", font=large, fill="#77e7ff")
+    player_left = afloat(game["player_ships"], game["dog_shots"])
+    enemy_left = afloat(game["enemy_ships"], game["player_shots"])
+    draw.rounded_rectangle((55, 220, 700, 430), 24, fill="#0a2c58", outline="#54cfe5", width=4)
+    draw.text((90, 255), f"ВАШ ФЛОТ   {player_left} КОРАБЛЕЙ", font=medium, fill="white")
+    draw.text((90, 325), f"ФЛОТ ПСА   {enemy_left} КОРАБЛЕЙ", font=medium, fill="#ffd36c")
+    shots = len(game["player_shots"])
+    hits = sum(index in fleet_cells(game["enemy_ships"]) for index in game["player_shots"])
+    draw.text((90, 390), f"Выстрелы: {shots}  Попадания: {hits}", font=medium, fill="#a7efff")
+    status = "ПОБЕДА!" if game.get("won") is True else "ПОРАЖЕНИЕ" if game.get("won") is False else "ВАШ ХОД"
+    color = "#65ef91" if game.get("won") is True else "#ff6b72" if game.get("won") is False else "#f5c85b"
+    draw.text((60, 505), status, font=title, fill=color, stroke_width=2, stroke_fill="#102953")
+    output = BytesIO()
+    canvas.save(output, "JPEG", quality=88, optimize=True)
+    return output.getvalue()
+
+
+def prepared_battle_view(api: API, game: dict, inline_id: str | None, own: bool = False):
     image = render_scene(game)
     if not inline_id:
-        return game_view(game, True, inventory, emoji_ids=emoji_ids), image
+        return battle_view(game, own), image
     cache_chat_id = int(os.getenv("CACHE_CHAT_ID", str(game["uid"])))
     try:
         file_id = api.cache_photo(cache_chat_id, image)
-        return game_view(game, True, inventory, file_id, emoji_ids), None
+        return battle_view(game, own, file_id), None
     except Exception as error:
         print("inline scene fallback:", type(error).__name__, error)
-        return game_view(game, False, inventory, emoji_ids=emoji_ids), None
+        return battle_view(game, own, False), None
+
+
+def stats_text(store: Store, user_id: int) -> str:
+    wins, losses, streak, best, coins, shots, hits = store.stats(user_id)
+    accuracy = round(hits * 100 / shots) if shots else 0
+    return (
+        f"Победы: {wins}\nПоражения: {losses}\nСерия: {streak}\n"
+        f"Рекорд: {best}\nМонеты: {coins} 🪙\nТочность: {accuracy}%"
+    )
+
+
+def configure_profile(api: API, store: Store):
+    api.call("setMyName", {"name": "Морской бой с Псом"})
+    api.call("setMyDescription", {"description": (
+        "Морской бой прямо в сообщениях Telegram. Выбирайте клетки, "
+        "топите корабли и победите Пса-адмирала!"
+    )})
+    api.call("setMyShortDescription", {
+        "short_description": "⚓ Кликабельный морской бой прямо в сообщениях Telegram"
+    })
+    if store.setting("profile_version") == PROFILE_VERSION:
+        return
+    api.multipart(
+        "setMyProfilePhoto",
+        {"photo": {"type": "static", "photo": "attach://avatar"}},
+        load_avatar(),
+        "avatar",
+        "avatar.jpg",
+        "image/jpeg",
+    )
+    store.set_setting("profile_version", PROFILE_VERSION)
 
 
 def main():
@@ -646,227 +542,115 @@ def main():
     if not token:
         raise SystemExit("BOT_TOKEN required")
     api = API(token)
-    store = Store(os.getenv("DATABASE_PATH", "cards.sqlite3"))
-    bot_info = api.call("getMe")
+    store = Store(os.getenv("DATABASE_PATH", "sea_battle.sqlite3"))
     commands = [
-        {"command": "start", "description": "Играть в Сундучки с Псом"},
-        {"command": "new", "description": "Новая игра"},
-        {"command": "group", "description": "Запустить игру в группе"},
-        {"command": "shop", "description": "Магазин расходников"},
+        {"command": "start", "description": "Начать морской бой"},
+        {"command": "new", "description": "Новый бой"},
+        {"command": "group", "description": "Запустить бой в группе"},
         {"command": "stats", "description": "Моя статистика"},
-        {"command": "top", "description": "Рейтинг игроков"},
-        {"command": "rating", "description": "Рейтинг игроков"},
+        {"command": "top", "description": "Рейтинг капитанов"},
+        {"command": "rules", "description": "Правила игры"},
         {"command": "creator", "description": "Создатель бота"},
-        {"command": "setupcards", "description": "Включить графические карты (создатель)"},
     ]
     api.call("setMyCommands", {"commands": commands})
     api.call("setMyCommands", {"commands": commands, "scope": {"type": "all_group_chats"}})
+    try:
+        configure_profile(api, store)
+    except Exception as error:
+        print("profile setup:", type(error).__name__, error)
     offset = 0
     while True:
         try:
             updates = api.call("getUpdates", {
-                "offset": offset, "timeout": 30,
+                "offset": offset,
+                "timeout": 30,
                 "allowed_updates": ["message", "callback_query", "inline_query", "guest_message"],
             }, 40)
             for update in updates:
                 offset = update["update_id"] + 1
                 if "inline_query" in update:
-                    inline = update["inline_query"]
-                    api.answer_inline(inline["id"], difficulty_view())
-                elif "guest_message" in update:
-                    guest = update["guest_message"]
-                    guest_query_id = guest.get("guest_query_id")
-                    if guest_query_id:
-                        # Guest Mode lets a user summon the game in a group even
-                        # when the bot itself has not been added to that chat.
-                        api.answer_guest(guest_query_id, difficulty_view())
-                elif "message" in update:
+                    api.answer_inline(update["inline_query"]["id"], menu_view())
+                    continue
+                if "guest_message" in update:
+                    query_id = update["guest_message"].get("guest_query_id")
+                    if query_id:
+                        api.answer_guest(query_id, menu_view())
+                    continue
+                if "message" in update:
                     message = update["message"]
                     text = message.get("text", "").split("@", 1)[0]
-                    if text == "/setupcards":
-                        user = message["from"]
-                        owner_id = os.getenv("OWNER_ID")
-                        is_owner = (
-                            (owner_id and str(user["id"]) == owner_id)
-                            or user.get("username", "").lower() == "eternall_dog"
-                        )
-                        if not is_owner:
-                            api.call("sendMessage", {
-                                "chat_id": message["chat"]["id"],
-                                "text": "Эта команда доступна только создателю бота.",
-                            })
-                        elif message["chat"].get("type") != "private":
-                            api.call("sendMessage", {
-                                "chat_id": message["chat"]["id"],
-                                "text": "Запустите /setupcards в личном чате с ботом.",
-                            })
-                        else:
-                            api.call("sendMessage", {
-                                "chat_id": message["chat"]["id"],
-                                "text": "🎨 Создаю 36 пиксельных карт. Это займёт около минуты…",
-                            })
-                            try:
-                                set_name, mapping = api.install_card_emoji(
-                                    user["id"], bot_info["username"]
-                                )
-                                store.save_card_emoji(mapping)
-                                api.call("sendMessage", {
-                                    "chat_id": message["chat"]["id"],
-                                    "text": (
-                                        "✅ Все 36 графических карт подключены. "
-                                        "Начните новую игру: /start\n"
-                                        f"Набор: https://t.me/addemoji/{set_name}"
-                                    ),
-                                })
-                            except Exception as error:
-                                print("custom emoji setup:", type(error).__name__, error)
-                                api.call("sendMessage", {
-                                    "chat_id": message["chat"]["id"],
-                                    "text": (
-                                        "Не удалось создать набор. Проверьте, что у владельца "
-                                        "бота активен Telegram Premium, затем повторите /setupcards."
-                                    ),
-                                })
-                    elif text == "/creator":
+                    chat_id = message["chat"]["id"]
+                    user_id = message["from"]["id"]
+                    if text == "/creator":
                         api.call("sendMessage", {
-                            "chat_id": message["chat"]["id"],
+                            "chat_id": chat_id,
                             "text": "Создатель бота — @eternall_dog\nПо всем вопросам и предложениям пишите ему.",
                         })
                     elif text == "/stats":
-                        wins, losses, streak, best, coins = store.stats(message["from"]["id"])
-                        api.call("sendMessage", {"chat_id": message["chat"]["id"],
-                            "text": f"Победы: {wins}\nПоражения: {losses}\nСерия: {streak}\nРекорд: {best}\nМонеты: {coins} 🪙"})
-                    elif text == "/shop":
-                        api.send_rich(message["chat"]["id"], shop_view(store, message["from"]["id"]))
-                    elif text in {"/top", "/rating"}:
+                        api.call("sendMessage", {"chat_id": chat_id, "text": stats_text(store, user_id)})
+                    elif text == "/top":
                         rows = store.leaders()
                         listing = "\n".join(
-                            f"{index}. Игрок {uid} — {wins} побед · {coins} 🪙"
-                            for index, (uid, wins, _, coins) in enumerate(rows, 1)
-                        ) or "Пока результатов нет."
-                        api.call("sendMessage", {"chat_id": message["chat"]["id"], "text": "🏆 Рейтинг\n" + listing})
+                            f"{number}. Капитан {uid} — {wins} побед · {coins} 🪙"
+                            for number, (uid, wins, _, coins) in enumerate(rows, 1)
+                        ) or "Пока победителей нет."
+                        api.call("sendMessage", {"chat_id": chat_id, "text": "🏆 Лучшие капитаны\n" + listing})
+                    elif text == "/rules":
+                        api.call("sendMessage", {"chat_id": chat_id, "text": (
+                            "Стреляйте по синим клеткам поля противника. После каждого вашего "
+                            "выстрела отвечает Пёс. Побеждает тот, кто первым потопит весь флот."
+                        )})
                     elif text in {"/start", "/new", "/group"}:
-                        api.send_rich(message["chat"]["id"], difficulty_view())
-                elif "callback_query" in update:
-                    query = update["callback_query"]
-                    data = query["data"]
-                    message = query.get("message")
-                    inline_id = query.get("inline_message_id")
-                    chat_id = message["chat"]["id"] if message else 0
-                    message_id = message["message_id"] if message else 0
-                    if data == "noop":
-                        api.answer(query["id"], "Эта карта пока скрыта.")
-                        continue
-                    if data == "rules":
-                        api.answer(query["id"], "Нажмите свой ранг. Соберите больше наборов из четырёх карт.", True)
-                        continue
-                    if data == "stats":
-                        wins, losses, streak, best, coins = store.stats(query["from"]["id"])
-                        api.answer(query["id"], f"Победы {wins} · Поражения {losses} · Серия {streak} · Рекорд {best} · {coins} 🪙", True)
-                        continue
-                    user_id = query["from"]["id"]
-                    if data in {"new", "menu"}:
-                        api.answer(query["id"])
-                        api.edit_rich(chat_id, message_id, difficulty_view(), inline_id)
-                        continue
-                    if data == "shop" or data.startswith("shop:"):
-                        game_id = data.partition(":")[2] or None
-                        api.answer(query["id"])
-                        api.edit_rich(chat_id, message_id, shop_view(store, user_id, game_id), inline_id)
-                        continue
-                    if data.startswith("buy:"):
-                        _, item, game_id = data.split(":", 2)
-                        bought, notice = store.buy(user_id, item)
-                        game_id = None if game_id == "-" else game_id
-                        api.answer(query["id"], notice, not bought)
-                        api.edit_rich(chat_id, message_id, shop_view(store, user_id, game_id), inline_id)
-                        continue
-                    if data.startswith("back:"):
-                        game = store.get(data.split(":", 1)[1])
-                        if not game or game["uid"] != user_id:
-                            api.answer(query["id"], "Партия не найдена.", True)
-                            continue
-                        api.answer(query["id"])
-                        view, image = prepared_game_view(api, store, game, inline_id)
-                        api.edit_rich(chat_id, message_id, view, inline_id, image)
-                        continue
-                    if data.startswith("difficulty:"):
-                        difficulty = data.split(":", 1)[1]
-                        game = new_game(user_id, difficulty)
-                        store.save(game)
-                        api.answer(query["id"])
-                        view, image = prepared_game_view(api, store, game, inline_id)
-                        api.edit_rich(chat_id, message_id, view, inline_id, image)
-                        continue
-                    if data.startswith("use:"):
-                        _, game_id, item = data.split(":", 2)
-                        game = store.get(game_id)
-                        if not game or game["uid"] != user_id or game["done"]:
-                            api.answer(query["id"], "Эта партия недоступна.", True)
-                            continue
-                        if item == "scent" and not game["dog"]:
-                            api.answer(query["id"], "У пса сейчас нет карт.", True)
-                            continue
-                        if item == "double_draw" and not game["deck"]:
-                            api.answer(query["id"], "Колода уже пуста.", True)
-                            continue
-                        if item == "shield" and game.get("shielded"):
-                            api.answer(query["id"], "Защита уже активна.", True)
-                            continue
-                        if item not in ITEMS or not store.consume(user_id, item):
-                            api.answer(query["id"], "Такого расходника нет в рюкзаке.", True)
-                            continue
-                        if item == "scent":
-                            revealed = rank(random.choice(game["dog"]))
-                            game["message"] = f"👃 Нюх подсказывает: у пса есть ранг {revealed}."
-                            game["pose"] = 3
-                        elif item == "double_draw":
-                            drawn = []
-                            for _ in range(min(2, len(game["deck"]))):
-                                drawn.append(game["deck"].pop())
-                            game["player"] += drawn
-                            game["player_books"] += take_books(game["player"])
-                            game["message"] = f"🃏 Двойной добор: получено {len(drawn)} карты."
-                        else:
-                            game["shielded"] = True
-                            game["message"] = "🛡️ Защита активна: следующий ход пса будет отменён."
-                    elif data.startswith("ask:"):
-                        _, game_id, wanted = data.split(":", 2)
-                        game = store.get(game_id)
-                        if not game or game["uid"] != user_id or game["done"]:
-                            api.answer(query["id"], "Эта партия недоступна.", True)
-                            continue
-                        if wanted not in {rank(card) for card in game["player"]}:
-                            api.answer(query["id"], "У вас нет такого ранга.")
-                            continue
-                        received = [card for card in game["dog"] if rank(card) == wanted]
-                        if received:
-                            game["dog"] = [card for card in game["dog"] if rank(card) != wanted]
-                            game["player"] += received
-                            game["message"] = f"Пёс отдал вам {len(received)} карт ранга {wanted}!"
-                            game["mood"] = "😮"
-                            game["pose"] = 5
-                        else:
-                            drawn = game["deck"].pop() if game["deck"] else None
-                            if drawn:
-                                game["player"].append(drawn)
-                            game["message"] = f"У пса нет {wanted}. Вы вытянули карту."
-                            game["mood"] = "😄"
-                            game["pose"] = 4
-                        game["player_books"] += take_books(game["player"])
-                        if game.get("shielded"):
-                            game["shielded"] = False
-                            game["message"] += "\n🛡️ Защита отменила ход пса."
-                        else:
-                            dog_turn(game)
-                    else:
-                        api.answer(query["id"], "Неизвестная кнопка.", True)
-                        continue
-                    finish_if_needed(game, store)
+                        api.send_rich(chat_id, menu_view())
+                    continue
+                if "callback_query" not in update:
+                    continue
+                query = update["callback_query"]
+                data = query["data"]
+                message = query.get("message")
+                inline_id = query.get("inline_message_id")
+                chat_id = message["chat"]["id"] if message else 0
+                message_id = message["message_id"] if message else 0
+                user_id = query["from"]["id"]
+                if data == "noop":
+                    api.answer(query["id"], "Здесь уже всё известно.")
+                    continue
+                if data == "stats":
+                    api.answer(query["id"], stats_text(store, user_id), True)
+                    continue
+                if data == "rules":
+                    api.answer(query["id"], (
+                        "Стреляйте по клеткам противника. 💥 — попадание, ☠ — корабль потоплен. "
+                        "После вашего выстрела ходит Пёс."
+                    ), True)
+                    continue
+                if data in {"new", "menu"}:
+                    api.answer(query["id"])
+                    api.edit_rich(chat_id, message_id, menu_view(), inline_id)
+                    continue
+                if data.startswith("size:"):
+                    game = new_game(user_id, int(data.split(":", 1)[1]))
                     store.save(game)
                     api.answer(query["id"])
-                    view, image = prepared_game_view(api, store, game, inline_id)
+                    view, image = prepared_battle_view(api, game, inline_id)
                     api.edit_rich(chat_id, message_id, view, inline_id, image)
+                    continue
+                if data.startswith("fire:") or data.startswith("board:"):
+                    parts = data.split(":")
+                    game = store.get(parts[1])
+                    if not game or game["uid"] != user_id:
+                        api.answer(query["id"], "Этот бой принадлежит другому капитану.", True)
+                        continue
+                    own = data.startswith("board:") and parts[2] == "own"
+                    if data.startswith("fire:"):
+                        fire(game, int(parts[2]), store)
+                        store.save(game)
+                        own = False
+                    api.answer(query["id"])
+                    view, image = prepared_battle_view(api, game, inline_id, own)
+                    api.edit_rich(chat_id, message_id, view, inline_id, image)
+                    continue
+                api.answer(query["id"], "Неизвестная команда.", True)
         except Exception as error:
             print(type(error).__name__, error)
             time.sleep(3)
