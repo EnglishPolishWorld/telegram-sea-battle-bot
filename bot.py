@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import random
+import re
 import sqlite3
 import time
 import urllib.error
@@ -68,14 +69,25 @@ class API:
             raise RuntimeError(result)
         return result["result"]
 
-    def multipart(self, method: str, payload: dict, image: bytes, file_field: str = "dog_scene"):
+    def multipart(
+        self,
+        method: str,
+        payload: dict,
+        image: bytes,
+        file_field: str = "dog_scene",
+        filename: str = "scene.jpg",
+        content_type: str = "image/jpeg",
+    ):
         boundary = "----carddogboundary"
         body = bytearray()
         for name, value in payload.items():
             if isinstance(value, (dict, list)):
                 value = json.dumps(value, ensure_ascii=False)
             body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode())
-        body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"scene.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".encode())
+        body.extend(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; "
+            f"filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n".encode()
+        )
         body.extend(image)
         body.extend(f"\r\n--{boundary}--\r\n".encode())
         request = urllib.request.Request(
@@ -142,6 +154,55 @@ class API:
             print("cache photo cleanup:", type(error).__name__, error)
         return file_id
 
+    def upload_static_sticker(self, user_id: int, image: bytes) -> str:
+        uploaded = self.multipart(
+            "uploadStickerFile",
+            {"user_id": user_id, "sticker_format": "static"},
+            image,
+            "sticker",
+            "card.png",
+            "image/png",
+        )
+        return uploaded["file_id"]
+
+    def install_card_emoji(self, user_id: int, bot_username: str) -> tuple[str, dict[str, str]]:
+        clean_username = re.sub(r"_+", "_", re.sub(r"[^a-zA-Z0-9_]", "", bot_username)).lower()
+        suffix = f"_by_{clean_username}"
+        prefix = f"dogcards_{user_id}"[:64 - len(suffix)].rstrip("_")
+        set_name = prefix + suffix
+        try:
+            sticker_set = self.call("getStickerSet", {"name": set_name})
+        except RuntimeError as error:
+            if "STICKERSET_INVALID" not in str(error):
+                raise
+            uploaded = []
+            for card in ALL_CARDS:
+                uploaded.append({
+                    "sticker": self.upload_static_sticker(user_id, render_card_emoji(card)),
+                    "format": "static",
+                    "emoji_list": [card_label(card)],
+                    "keywords": [card, rank(card)],
+                })
+            self.call("createNewStickerSet", {
+                "user_id": user_id,
+                "name": set_name,
+                "title": "Пиксельные карты Сундучков",
+                "stickers": uploaded,
+                "sticker_type": "custom_emoji",
+            }, 120)
+            sticker_set = self.call("getStickerSet", {"name": set_name})
+        stickers = sticker_set.get("stickers", [])
+        if len(stickers) < len(ALL_CARDS):
+            raise RuntimeError("В наборе Telegram меньше 36 карт")
+        mapping = {
+            card: sticker["custom_emoji_id"]
+            for card, sticker in zip(ALL_CARDS, stickers)
+            if sticker.get("custom_emoji_id")
+        }
+        if len(mapping) != len(ALL_CARDS):
+            raise RuntimeError("Telegram не вернул ID всех 36 custom emoji")
+        return set_name, mapping
+
 
 class Store:
     def __init__(self, path: str):
@@ -160,6 +221,10 @@ class Store:
             "CREATE TABLE IF NOT EXISTS inventory("
             "user_id INTEGER NOT NULL,item TEXT NOT NULL,quantity INTEGER DEFAULT 0,"
             "PRIMARY KEY(user_id,item))"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS card_emoji("
+            "card TEXT PRIMARY KEY,custom_emoji_id TEXT NOT NULL)"
         )
         self.db.commit()
 
@@ -233,6 +298,18 @@ class Store:
         return self.db.execute(
             "SELECT user_id,wins,best,coins FROM stats ORDER BY wins DESC,best DESC LIMIT 10"
         ).fetchall()
+
+    def card_emoji(self) -> dict[str, str]:
+        return dict(self.db.execute(
+            "SELECT card,custom_emoji_id FROM card_emoji"
+        ).fetchall())
+
+    def save_card_emoji(self, mapping: dict[str, str]):
+        self.db.executemany(
+            "INSERT OR REPLACE INTO card_emoji(card,custom_emoji_id) VALUES(?,?)",
+            mapping.items(),
+        )
+        self.db.commit()
 
 
 def rank(card: str) -> str:
@@ -334,7 +411,7 @@ def finish_if_needed(game: dict, store: Store):
         store.record(game["uid"], won, reward)
 
 
-def button(text: str, data: str, style: str | None = None) -> dict:
+def button(text: str | dict | list, data: str, style: str | None = None) -> dict:
     result = {"text": text, "callback_data": data}
     if style:
         result["style"] = style
@@ -348,6 +425,20 @@ def card_label(card: str) -> str:
 def card_button_label(card: str) -> str:
     value = rank(card)
     return f"{card_label(card)} {RANK_NAMES.get(value, value)} {dict(SUITS)[card[-1]]}"
+
+
+def card_button_text(card: str, emoji_ids: dict[str, str]) -> str | list:
+    emoji_id = emoji_ids.get(card)
+    if not emoji_id:
+        return card_button_label(card)
+    return [
+        {
+            "type": "custom_emoji",
+            "custom_emoji_id": emoji_id,
+            "alternative_text": card_label(card),
+        },
+        f" {RANK_NAMES.get(rank(card), rank(card))}",
+    ]
 
 
 def difficulty_view() -> dict:
@@ -398,6 +489,31 @@ def load_asset(path: str) -> Image.Image:
         return Image.open(BytesIO(base64.b64decode(source.read()))).convert("RGBA")
 
 
+def render_card_emoji(card: str) -> bytes:
+    """Draw an exact 100x100 static Telegram custom emoji in crisp pixel art."""
+    value = rank(card)
+    suit = dict(SUITS)[card[-1]]
+    ink = "#d4263f" if card[-1] in {"H", "D"} else "#17141c"
+    tiny = Image.new("RGBA", (50, 50), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(tiny)
+    draw.rounded_rectangle((7, 3, 45, 49), 4, fill="#21172e")
+    draw.rounded_rectangle((4, 1, 42, 47), 4, fill="#fff7df", outline="#f1c65d", width=2)
+    draw.line((8, 5, 38, 5), fill="#fffdf4", width=1)
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    rank_font = ImageFont.truetype(font_path, 11 if value == "10" else 13)
+    suit_font = ImageFont.truetype(font_path, 16)
+    center_font = ImageFont.truetype(font_path, 22)
+    draw.text((8, 4), value, fill=ink, font=rank_font, stroke_width=1, stroke_fill="#fff7df")
+    draw.text((9, 16), suit, fill=ink, font=suit_font, anchor="ma")
+    draw.text((24, 30), suit, fill=ink, font=center_font, anchor="mm")
+    draw.text((39, 44), value, fill=ink, font=rank_font, anchor="rs",
+              stroke_width=1, stroke_fill="#fff7df")
+    emoji = tiny.resize((100, 100), Image.Resampling.NEAREST)
+    output = BytesIO()
+    emoji.save(output, "PNG", optimize=True)
+    return output.getvalue()
+
+
 def render_scene(game: dict) -> bytes:
     canvas = load_asset(os.path.join(ASSET_ROOT, "table.png.b64")).resize((1280, 720))
     dog = load_asset(os.path.join(ASSETS, f"{game.get('pose', 0)}.png.b64"))
@@ -444,8 +560,10 @@ def game_view(
     graphical: bool = True,
     inventory: dict[str, int] | None = None,
     photo_media: str | None = None,
+    emoji_ids: dict[str, str] | None = None,
 ) -> dict:
     inventory = inventory or {key: 0 for key in ITEMS}
+    emoji_ids = emoji_ids or {}
     dog_cells = [{
         "text": {"type": "button", "button": button("🂠", "noop")},
         "align": "center", "valign": "middle",
@@ -455,10 +573,10 @@ def game_view(
                       "align": "center", "valign": "middle"}]
     player_cells = []
     for card in sorted(game["player"], key=lambda item: (RANKS.index(rank(item)), item[-1])):
-        style = "primary" if card[-1] in {"H", "D"} else "success"
+        style = None if card in emoji_ids else ("primary" if card[-1] in {"H", "D"} else "success")
         player_cells.append({
             "text": {"type": "button", "button": button(
-                card_button_label(card), f"ask:{game['id']}:{rank(card)}", style
+                card_button_text(card, emoji_ids), f"ask:{game['id']}:{rank(card)}", style
             )},
             "align": "center", "valign": "middle",
         })
@@ -510,16 +628,17 @@ def game_view(
 
 def prepared_game_view(api: API, store: Store, game: dict, inline_id: str | None):
     inventory = store.inventory(game["uid"])
+    emoji_ids = store.card_emoji()
     image = render_scene(game)
     if not inline_id:
-        return game_view(game, True, inventory), image
+        return game_view(game, True, inventory, emoji_ids=emoji_ids), image
     cache_chat_id = int(os.getenv("CACHE_CHAT_ID", str(game["uid"])))
     try:
         file_id = api.cache_photo(cache_chat_id, image)
-        return game_view(game, True, inventory, file_id), None
+        return game_view(game, True, inventory, file_id, emoji_ids), None
     except Exception as error:
         print("inline scene fallback:", type(error).__name__, error)
-        return game_view(game, False, inventory), None
+        return game_view(game, False, inventory, emoji_ids=emoji_ids), None
 
 
 def main():
@@ -528,6 +647,7 @@ def main():
         raise SystemExit("BOT_TOKEN required")
     api = API(token)
     store = Store(os.getenv("DATABASE_PATH", "cards.sqlite3"))
+    bot_info = api.call("getMe")
     commands = [
         {"command": "start", "description": "Играть в Сундучки с Псом"},
         {"command": "new", "description": "Новая игра"},
@@ -537,6 +657,7 @@ def main():
         {"command": "top", "description": "Рейтинг игроков"},
         {"command": "rating", "description": "Рейтинг игроков"},
         {"command": "creator", "description": "Создатель бота"},
+        {"command": "setupcards", "description": "Включить графические карты (создатель)"},
     ]
     api.call("setMyCommands", {"commands": commands})
     api.call("setMyCommands", {"commands": commands, "scope": {"type": "all_group_chats"}})
@@ -562,7 +683,51 @@ def main():
                 elif "message" in update:
                     message = update["message"]
                     text = message.get("text", "").split("@", 1)[0]
-                    if text == "/creator":
+                    if text == "/setupcards":
+                        user = message["from"]
+                        owner_id = os.getenv("OWNER_ID")
+                        is_owner = (
+                            (owner_id and str(user["id"]) == owner_id)
+                            or user.get("username", "").lower() == "eternall_dog"
+                        )
+                        if not is_owner:
+                            api.call("sendMessage", {
+                                "chat_id": message["chat"]["id"],
+                                "text": "Эта команда доступна только создателю бота.",
+                            })
+                        elif message["chat"].get("type") != "private":
+                            api.call("sendMessage", {
+                                "chat_id": message["chat"]["id"],
+                                "text": "Запустите /setupcards в личном чате с ботом.",
+                            })
+                        else:
+                            api.call("sendMessage", {
+                                "chat_id": message["chat"]["id"],
+                                "text": "🎨 Создаю 36 пиксельных карт. Это займёт около минуты…",
+                            })
+                            try:
+                                set_name, mapping = api.install_card_emoji(
+                                    user["id"], bot_info["username"]
+                                )
+                                store.save_card_emoji(mapping)
+                                api.call("sendMessage", {
+                                    "chat_id": message["chat"]["id"],
+                                    "text": (
+                                        "✅ Все 36 графических карт подключены. "
+                                        "Начните новую игру: /start\n"
+                                        f"Набор: https://t.me/addemoji/{set_name}"
+                                    ),
+                                })
+                            except Exception as error:
+                                print("custom emoji setup:", type(error).__name__, error)
+                                api.call("sendMessage", {
+                                    "chat_id": message["chat"]["id"],
+                                    "text": (
+                                        "Не удалось создать набор. Проверьте, что у владельца "
+                                        "бота активен Telegram Premium, затем повторите /setupcards."
+                                    ),
+                                })
+                    elif text == "/creator":
                         api.call("sendMessage", {
                             "chat_id": message["chat"]["id"],
                             "text": "Создатель бота — @eternall_dog\nПо всем вопросам и предложениям пишите ему.",
