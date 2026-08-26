@@ -68,14 +68,14 @@ class API:
             raise RuntimeError(result)
         return result["result"]
 
-    def multipart(self, method: str, payload: dict, image: bytes):
+    def multipart(self, method: str, payload: dict, image: bytes, file_field: str = "dog_scene"):
         boundary = "----carddogboundary"
         body = bytearray()
         for name, value in payload.items():
             if isinstance(value, (dict, list)):
                 value = json.dumps(value, ensure_ascii=False)
             body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode())
-        body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"dog_scene\"; filename=\"scene.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".encode())
+        body.extend(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"scene.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".encode())
         body.extend(image)
         body.extend(f"\r\n--{boundary}--\r\n".encode())
         request = urllib.request.Request(
@@ -114,6 +114,21 @@ class API:
         if text:
             data["text"] = text
         return self.call("answerCallbackQuery", data)
+
+    def cache_photo(self, chat_id: int, image: bytes) -> str:
+        message = self.multipart("sendPhoto", {
+            "chat_id": chat_id,
+            "disable_notification": True,
+        }, image, "photo")
+        file_id = message["photo"][-1]["file_id"]
+        try:
+            self.call("deleteMessage", {
+                "chat_id": chat_id,
+                "message_id": message["message_id"],
+            })
+        except Exception as error:
+            print("cache photo cleanup:", type(error).__name__, error)
+        return file_id
 
 
 class Store:
@@ -412,7 +427,12 @@ def render_scene(game: dict) -> bytes:
     return output.getvalue()
 
 
-def game_view(game: dict, graphical: bool = True, inventory: dict[str, int] | None = None) -> dict:
+def game_view(
+    game: dict,
+    graphical: bool = True,
+    inventory: dict[str, int] | None = None,
+    photo_media: str | None = None,
+) -> dict:
     inventory = inventory or {key: 0 for key in ITEMS}
     dog_cells = [{
         "text": {"type": "button", "button": button("🂠", "noop")},
@@ -438,7 +458,7 @@ def game_view(game: dict, graphical: bool = True, inventory: dict[str, int] | No
     if graphical:
         blocks.append({
             "type": "photo",
-            "photo": {"type": "photo", "media": "attach://dog_scene"},
+            "photo": {"type": "photo", "media": photo_media or "attach://dog_scene"},
         })
     difficulty = DIFFICULTIES.get(game.get("difficulty", "easy"), DIFFICULTIES["easy"])
     blocks += [
@@ -474,6 +494,20 @@ def game_view(game: dict, graphical: bool = True, inventory: dict[str, int] | No
         ]},
     ]
     return {"blocks": blocks}
+
+
+def prepared_game_view(api: API, store: Store, game: dict, inline_id: str | None):
+    inventory = store.inventory(game["uid"])
+    image = render_scene(game)
+    if not inline_id:
+        return game_view(game, True, inventory), image
+    cache_chat_id = int(os.getenv("CACHE_CHAT_ID", str(game["uid"])))
+    try:
+        file_id = api.cache_photo(cache_chat_id, image)
+        return game_view(game, True, inventory, file_id), None
+    except Exception as error:
+        print("inline scene fallback:", type(error).__name__, error)
+        return game_view(game, False, inventory), None
 
 
 def main():
@@ -569,22 +603,16 @@ def main():
                             api.answer(query["id"], "Партия не найдена.", True)
                             continue
                         api.answer(query["id"])
-                        api.edit_rich(
-                            chat_id, message_id,
-                            game_view(game, not bool(inline_id), store.inventory(user_id)),
-                            inline_id, None if inline_id else render_scene(game),
-                        )
+                        view, image = prepared_game_view(api, store, game, inline_id)
+                        api.edit_rich(chat_id, message_id, view, inline_id, image)
                         continue
                     if data.startswith("difficulty:"):
                         difficulty = data.split(":", 1)[1]
                         game = new_game(user_id, difficulty)
                         store.save(game)
                         api.answer(query["id"])
-                        api.edit_rich(
-                            chat_id, message_id,
-                            game_view(game, not bool(inline_id), store.inventory(user_id)),
-                            inline_id, None if inline_id else render_scene(game),
-                        )
+                        view, image = prepared_game_view(api, store, game, inline_id)
+                        api.edit_rich(chat_id, message_id, view, inline_id, image)
                         continue
                     if data.startswith("use:"):
                         _, game_id, item = data.split(":", 2)
@@ -653,11 +681,8 @@ def main():
                     finish_if_needed(game, store)
                     store.save(game)
                     api.answer(query["id"])
-                    api.edit_rich(
-                        chat_id, message_id,
-                        game_view(game, not bool(inline_id), store.inventory(user_id)), inline_id,
-                        None if inline_id else render_scene(game),
-                    )
+                    view, image = prepared_game_view(api, store, game, inline_id)
+                    api.edit_rich(chat_id, message_id, view, inline_id, image)
         except Exception as error:
             print(type(error).__name__, error)
             time.sleep(3)
