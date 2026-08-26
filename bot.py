@@ -355,7 +355,7 @@ def shop_view(store: Store, user_id: int, game_id: str | None = None) -> dict:
             f"{product['description']}\nВ рюкзаке: {owned[key]}"
         )})
         blocks.append({"type": "buttons", "align": "left", "buttons": [
-            button(f"Купить за {product['price']} 🪙", f"buy:{key}:{game_id or '-'}", "primary")
+            button(f"🪙 {product['price']} · Купить", f"buy:{key}:{game_id or '-'}", "primary")
         ]})
     blocks.append({"type": "buttons", "align": "center", "buttons": [
         button("← К игре" if game_id else "← В меню", f"back:{game_id}" if game_id else "menu")
