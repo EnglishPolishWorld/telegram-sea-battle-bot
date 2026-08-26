@@ -77,6 +77,23 @@ class GameTests(unittest.TestCase):
             store = bot.Store(path)
             self.assertEqual(store.stats(1), (3, 0, 0, 0, 0))
 
+    def test_inline_game_uses_previously_uploaded_photo(self):
+        class FakeAPI:
+            def cache_photo(self, chat_id, image):
+                self.chat_id = chat_id
+                self.image = image
+                return "telegram-file-id"
+
+        with TemporaryDirectory() as directory:
+            store = bot.Store(str(Path(directory) / "inline.sqlite3"))
+            game = bot.new_game(77)
+            api = FakeAPI()
+            view, image = bot.prepared_game_view(api, store, game, "inline-message")
+            self.assertIsNone(image)
+            self.assertEqual(api.chat_id, 77)
+            self.assertGreater(len(api.image), 50000)
+            self.assertEqual(view["blocks"][0]["photo"]["media"], "telegram-file-id")
+
 
 if __name__ == "__main__":
     unittest.main()
