@@ -88,6 +88,86 @@ class SeaBattleTests(unittest.TestCase):
             for item in block["buttons"]
         ]
         self.assertTrue({"size:6", "size:8", "size:10"}.issubset(callbacks))
+        labels = " ".join(
+            item["text"]
+            for block in bot.menu_view()["blocks"] if block["type"] == "buttons"
+            for item in block["buttons"]
+        )
+        self.assertNotIn("+5", labels)
+        self.assertNotIn("+10", labels)
+        self.assertNotIn("+15", labels)
+
+    def test_manual_placement_requires_complete_fleet(self):
+        game = bot.new_game(1, 6, manual=True)
+        self.assertEqual(game["phase"], "placing")
+        self.assertEqual(game["player_ships"], [])
+        ready, _ = bot.begin_battle(game)
+        self.assertFalse(ready)
+        game["player_ships"] = bot.place_fleet(6, bot.GAME_MODES[6]["ships"], random.Random(3))
+        ready, _ = bot.begin_battle(game)
+        self.assertTrue(ready)
+        self.assertEqual(game["phase"], "battle")
+
+    def test_manual_ships_cannot_touch(self):
+        game = bot.new_game(1, 6, manual=True)
+        placed, _ = bot.place_player_ship(game, 0)
+        self.assertTrue(placed)
+        game["orientation"] = "v"
+        placed, _ = bot.place_player_ship(game, 1)
+        self.assertFalse(placed)
+
+    def test_shop_has_ten_items_and_buy_only_buttons(self):
+        with TemporaryDirectory() as directory:
+            store = bot.Store(str(Path(directory) / "shop.sqlite3"))
+            self.assertEqual(len(bot.SHOP_ITEMS), 10)
+            view = bot.shop_view(store, 1, 0)
+            buy_buttons = [
+                item for block in view["blocks"] if block["type"] == "buttons"
+                for item in block["buttons"] if item["callback_data"].startswith("buy:")
+            ]
+            self.assertTrue(buy_buttons)
+            self.assertTrue(all(item["text"] == "Купить" for item in buy_buttons))
+
+    def test_shop_purchase_spends_coins_and_adds_inventory(self):
+        with TemporaryDirectory() as directory:
+            store = bot.Store(str(Path(directory) / "shop.sqlite3"))
+            store.db.execute("INSERT INTO naval_stats(user_id,coins) VALUES(?,?)", (8, 100))
+            store.db.commit()
+            bought, _ = store.buy(8, "radar")
+            self.assertTrue(bought)
+            self.assertEqual(store.inventory(8)["radar"], 1)
+            self.assertEqual(store.stats(8)[4], 75)
+
+    def test_radar_reveals_enemy_cell_and_is_consumed(self):
+        with TemporaryDirectory() as directory:
+            store = bot.Store(str(Path(directory) / "items.sqlite3"))
+            game = bot.new_game(5, 6)
+            store.db.execute(
+                "INSERT INTO naval_inventory(user_id,item_id,quantity) VALUES(?,?,?)",
+                (5, "radar", 1),
+            )
+            store.db.commit()
+            used, _ = bot.use_item(game, "radar", store, random.Random(2))
+            self.assertTrue(used)
+            self.assertEqual(len(game["revealed_enemy"]), 1)
+            self.assertNotIn("radar", store.inventory(5))
+
+    def test_all_shop_items_can_be_used(self):
+        with TemporaryDirectory() as directory:
+            store = bot.Store(str(Path(directory) / "all-items.sqlite3"))
+            for number, item_id in enumerate(bot.SHOP_ITEMS, 1):
+                user_id = 100 + number
+                game = bot.new_game(user_id, 6)
+                if item_id == "repair":
+                    game["dog_shots"] = [game["player_ships"][0][0]]
+                store.db.execute(
+                    "INSERT INTO naval_inventory(user_id,item_id,quantity) VALUES(?,?,1)",
+                    (user_id, item_id),
+                )
+                store.db.commit()
+                used, notice = bot.use_item(game, item_id, store, random.Random(number))
+                self.assertTrue(used, f"{item_id}: {notice}")
+                self.assertNotIn(item_id, store.inventory(user_id))
 
     def test_old_database_tables_do_not_break_migration(self):
         with TemporaryDirectory() as directory:
