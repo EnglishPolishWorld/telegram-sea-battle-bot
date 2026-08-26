@@ -21,6 +21,29 @@ GAME_MODES = {
     8: {"name": "Морской", "reward": 10, "ships": [4, 3, 3, 2, 2, 1, 1], "icon": "⚓"},
     10: {"name": "Адмирал", "reward": 15, "ships": [4, 3, 3, 2, 2, 2, 1, 1, 1, 1], "icon": "🫡"},
 }
+SHOP_ITEMS = {
+    "radar": {"name": "Радар", "icon": "📡", "price": 25,
+              "description": "Показывает одну клетку, где точно есть корабль."},
+    "mine": {"name": "Мина", "icon": "💣", "price": 20,
+             "description": "Следующий выстрел Пса будет обезврежен."},
+    "shield": {"name": "Щит", "icon": "🛡", "price": 18,
+               "description": "Блокирует следующее попадание по вашему кораблю."},
+    "airstrike": {"name": "Авиаудар", "icon": "✈️", "price": 45,
+                  "description": "Накрывает сразу три случайные клетки противника."},
+    "sonar": {"name": "Сонар", "icon": "🔊", "price": 22,
+              "description": "Сообщает, сколько палуб скрыто в случайной строке."},
+    "torpedo": {"name": "Торпеда", "icon": "🚀", "price": 40,
+                "description": "Проверяет четыре клетки в случайной линии."},
+    "repair": {"name": "Ремкомплект", "icon": "🔧", "price": 30,
+               "description": "Восстанавливает одну подбитую палубу непотопленного корабля."},
+    "smoke": {"name": "Дымовая завеса", "icon": "🌫", "price": 15,
+              "description": "Следующий выстрел Пса гарантированно уйдёт в воду."},
+    "spyglass": {"name": "Подзорная труба", "icon": "🔭", "price": 12,
+                 "description": "Отмечает две клетки, где кораблей точно нет."},
+    "salvo": {"name": "Дополнительный залп", "icon": "💥", "price": 35,
+              "description": "После вашего выстрела автоматически делает ещё один."},
+}
+SHOP_PAGE_SIZE = 2
 PROFILE_VERSION = "sea-battle-v1"
 
 
@@ -157,6 +180,11 @@ class Store:
             "CREATE TABLE IF NOT EXISTS naval_settings("
             "key TEXT PRIMARY KEY,value TEXT NOT NULL)"
         )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS naval_inventory("
+            "user_id INTEGER NOT NULL,item_id TEXT NOT NULL,quantity INTEGER DEFAULT 0,"
+            "PRIMARY KEY(user_id,item_id))"
+        )
         self.db.commit()
 
     def save(self, game: dict):
@@ -198,6 +226,46 @@ class Store:
             "SELECT user_id,wins,best,coins FROM naval_stats "
             "ORDER BY wins DESC,best DESC LIMIT 10"
         ).fetchall()
+
+    def inventory(self, user_id: int) -> dict[str, int]:
+        return {
+            item_id: quantity
+            for item_id, quantity in self.db.execute(
+                "SELECT item_id,quantity FROM naval_inventory WHERE user_id=? AND quantity>0",
+                (user_id,),
+            ).fetchall()
+        }
+
+    def buy(self, user_id: int, item_id: str) -> tuple[bool, str]:
+        item = SHOP_ITEMS.get(item_id)
+        if not item:
+            return False, "Такого товара нет."
+        self.db.execute("INSERT OR IGNORE INTO naval_stats(user_id) VALUES(?)", (user_id,))
+        coins = self.db.execute(
+            "SELECT coins FROM naval_stats WHERE user_id=?", (user_id,)
+        ).fetchone()[0]
+        if coins < item["price"]:
+            return False, f"Не хватает {item['price'] - coins} монет."
+        self.db.execute(
+            "UPDATE naval_stats SET coins=coins-? WHERE user_id=?", (item["price"], user_id)
+        )
+        self.db.execute(
+            "INSERT INTO naval_inventory(user_id,item_id,quantity) VALUES(?,?,1) "
+            "ON CONFLICT(user_id,item_id) DO UPDATE SET quantity=quantity+1",
+            (user_id, item_id),
+        )
+        self.db.commit()
+        return True, f"{item['icon']} {item['name']} добавлен в инвентарь."
+
+    def consume(self, user_id: int, item_id: str) -> bool:
+        cursor = self.db.execute(
+            "UPDATE naval_inventory SET quantity=quantity-1 "
+            "WHERE user_id=? AND item_id=? AND quantity>0",
+            (user_id, item_id),
+        )
+        self.db.execute("DELETE FROM naval_inventory WHERE quantity<=0")
+        self.db.commit()
+        return cursor.rowcount == 1
 
     def setting(self, key: str) -> str | None:
         row = self.db.execute("SELECT value FROM naval_settings WHERE key=?", (key,)).fetchone()
@@ -281,23 +349,83 @@ def afloat(ships: list[list[int]], shots: list[int]) -> int:
     return sum(not is_sunk(ship, shots) for ship in ships)
 
 
-def new_game(user_id: int, size: int = 8) -> dict:
+def ship_cells_from(index: int, length: int, size: int, vertical: bool) -> list[int] | None:
+    row, column = divmod(index, size)
+    if (vertical and row + length > size) or (not vertical and column + length > size):
+        return None
+    return [index + offset * size if vertical else index + offset for offset in range(length)]
+
+
+def can_place_ship(ships: list[list[int]], cells: list[int], size: int) -> bool:
+    occupied = fleet_cells(ships)
+    blocked = set(occupied)
+    for cell in occupied:
+        blocked.update(adjacent(cell, size, True))
+    return not blocked.intersection(cells)
+
+
+def new_game(user_id: int, size: int = 8, manual: bool = False) -> dict:
     size = size if size in GAME_MODES else 8
     mode = GAME_MODES[size]
     return {
         "id": uuid.uuid4().hex[:10],
         "uid": user_id,
         "size": size,
-        "player_ships": place_fleet(size, mode["ships"]),
+        "phase": "placing" if manual else "battle",
+        "orientation": "h",
+        "player_ships": [] if manual else place_fleet(size, mode["ships"]),
         "enemy_ships": place_fleet(size, mode["ships"]),
         "player_shots": [],
         "dog_shots": [],
         "dog_targets": [],
-        "message": "Ваш ход, капитан. Выберите клетку для выстрела.",
+        "revealed_enemy": [],
+        "revealed_water": [],
+        "mine": 0,
+        "shield": 0,
+        "smoke": 0,
+        "salvo": 0,
+        "message": (
+            "Расставьте корабли. Нажмите клетку, с которой начнётся корабль."
+            if manual else "Ваш ход, капитан. Выберите клетку для выстрела."
+        ),
         "done": False,
         "won": None,
         "started": int(time.time()),
     }
+
+
+def next_ship_length(game: dict) -> int | None:
+    lengths = GAME_MODES[game["size"]]["ships"]
+    return lengths[len(game["player_ships"])] if len(game["player_ships"]) < len(lengths) else None
+
+
+def place_player_ship(game: dict, index: int) -> tuple[bool, str]:
+    if game.get("phase") != "placing":
+        return False, "Расстановка уже завершена."
+    length = next_ship_length(game)
+    if length is None:
+        return False, "Все корабли уже расставлены."
+    cells = ship_cells_from(index, length, game["size"], game.get("orientation") == "v")
+    if not cells:
+        return False, "Корабль выходит за границу поля."
+    if not can_place_ship(game["player_ships"], cells, game["size"]):
+        return False, "Корабли не могут касаться друг друга."
+    game["player_ships"].append(cells)
+    remaining = len(GAME_MODES[game["size"]]["ships"]) - len(game["player_ships"])
+    game["message"] = (
+        "Флот готов. Нажмите «Начать бой»."
+        if not remaining else f"Корабль размещён. Осталось: {remaining}."
+    )
+    return True, game["message"]
+
+
+def begin_battle(game: dict) -> tuple[bool, str]:
+    if next_ship_length(game) is not None:
+        return False, "Сначала расставьте весь флот."
+    game["phase"] = "battle"
+    game["started"] = int(time.time())
+    game["message"] = "Флот готов. Ваш ход, капитан!"
+    return True, game["message"]
 
 
 def finish_if_needed(game: dict, store: Store) -> bool:
@@ -322,6 +450,18 @@ def finish_if_needed(game: dict, store: Store) -> bool:
 def dog_fire(game: dict, rng=random) -> tuple[int, bool]:
     size = game["size"]
     fired = set(game["dog_shots"])
+    if game.get("mine", 0):
+        game["mine"] -= 1
+        game["dog_event"] = "mine"
+        return -1, False
+    if game.get("smoke", 0):
+        water = list(set(range(size * size)) - fleet_cells(game["player_ships"]) - fired)
+        if water:
+            game["smoke"] -= 1
+            target = rng.choice(water)
+            game["dog_shots"].append(target)
+            game["dog_event"] = "smoke"
+            return target, False
     targets = game["dog_targets"]
     while targets and targets[-1] in fired:
         targets.pop()
@@ -331,12 +471,18 @@ def dog_fire(game: dict, rng=random) -> tuple[int, bool]:
         target = rng.choice([index for index in range(size * size) if index not in fired])
     game["dog_shots"].append(target)
     hit = target in fleet_cells(game["player_ships"])
+    if hit and game.get("shield", 0):
+        game["shield"] -= 1
+        game["dog_shots"].pop()
+        game["dog_event"] = "shield"
+        return target, False
     if hit:
         ship = ship_at(game["player_ships"], target)
         if ship and not is_sunk(ship, game["dog_shots"]):
             nearby = [cell for cell in adjacent(target, size) if cell not in game["dog_shots"]]
             rng.shuffle(nearby)
             targets.extend(nearby)
+    game["dog_event"] = "normal"
     return target, hit
 
 
@@ -344,6 +490,8 @@ def fire(game: dict, index: int, store: Store, rng=random) -> str:
     size = game["size"]
     if game["done"]:
         return "Партия уже закончена."
+    if game.get("phase", "battle") != "battle":
+        return "Сначала завершите расстановку флота."
     if not 0 <= index < size * size or index in game["player_shots"]:
         return "Эта клетка уже проверена."
     game["player_shots"].append(index)
@@ -353,34 +501,202 @@ def fire(game: dict, index: int, store: Store, rng=random) -> str:
     if target_ship and is_sunk(target_ship, game["player_shots"]):
         player_result = "корабль потоплен"
     game["message"] = f"🎯 {index_to_coord(index, size)}: {player_result}!"
+    if game.get("salvo", 0):
+        game["salvo"] -= 1
+        available = [cell for cell in range(size * size) if cell not in game["player_shots"]]
+        if available:
+            extra = rng.choice(available)
+            game["player_shots"].append(extra)
+            extra_hit = extra in fleet_cells(game["enemy_ships"])
+            game["message"] += (
+                f"\n💥 Дополнительный залп в {index_to_coord(extra, size)}: "
+                f"{'попадание!' if extra_hit else 'мимо.'}"
+            )
     if finish_if_needed(game, store):
         return game["message"]
     dog_index, dog_hit = dog_fire(game, rng)
-    game["message"] += (
-        f"\n🐕 Пёс стреляет в {index_to_coord(dog_index, size)}: "
-        f"{'попал!' if dog_hit else 'мимо.'}"
-    )
+    if game.get("dog_event") == "mine":
+        game["message"] += "\n💣 Мина обезвредила выстрел Пса!"
+    elif game.get("dog_event") == "shield":
+        game["message"] += f"\n🛡 Щит заблокировал попадание в {index_to_coord(dog_index, size)}!"
+    elif game.get("dog_event") == "smoke":
+        game["message"] += f"\n🌫 Пёс промахнулся в дыму: {index_to_coord(dog_index, size)}."
+    else:
+        game["message"] += (
+            f"\n🐕 Пёс стреляет в {index_to_coord(dog_index, size)}: "
+            f"{'попал!' if dog_hit else 'мимо.'}"
+        )
     finish_if_needed(game, store)
     return game["message"]
+
+
+def use_item(game: dict, item_id: str, store: Store, rng=random) -> tuple[bool, str]:
+    if game.get("phase", "battle") != "battle" or game.get("done"):
+        return False, "Расходники можно применять только во время боя."
+    if store.inventory(game["uid"]).get(item_id, 0) <= 0:
+        return False, "Этого предмета нет в инвентаре."
+    size = game["size"]
+    unshot = set(range(size * size)) - set(game["player_shots"])
+    enemy = fleet_cells(game["enemy_ships"])
+    message = ""
+    if item_id == "radar":
+        choices = list(unshot & enemy - set(game.get("revealed_enemy", [])))
+        if not choices:
+            return False, "Радар больше не находит новых целей."
+        target = rng.choice(choices)
+        game.setdefault("revealed_enemy", []).append(target)
+        message = f"📡 Радар обнаружил цель в {index_to_coord(target, size)}."
+    elif item_id == "mine":
+        game["mine"] = game.get("mine", 0) + 1
+        message = "💣 Мина установлена и перехватит следующий выстрел Пса."
+    elif item_id == "shield":
+        game["shield"] = game.get("shield", 0) + 1
+        message = "🛡 Щит защитит от следующего попадания."
+    elif item_id == "airstrike":
+        targets = rng.sample(list(unshot), min(3, len(unshot)))
+        game["player_shots"].extend(targets)
+        hits = sum(target in enemy for target in targets)
+        message = f"✈️ Авиаудар: проверено {len(targets)} клетки, попаданий — {hits}."
+    elif item_id == "sonar":
+        row = rng.randrange(size)
+        count = sum(row * size + column in enemy for column in range(size))
+        message = f"🔊 Сонар: в строке {row + 1} скрыто палуб — {count}."
+    elif item_id == "torpedo":
+        vertical = bool(rng.randrange(2))
+        line = rng.randrange(size)
+        cells = [row * size + line for row in range(size)] if vertical else [line * size + col for col in range(size)]
+        targets = [cell for cell in cells if cell in unshot][:4]
+        game["player_shots"].extend(targets)
+        hits = sum(target in enemy for target in targets)
+        message = f"🚀 Торпеда проверила {len(targets)} клетки, попаданий — {hits}."
+    elif item_id == "repair":
+        damaged = [
+            cell for ship in game["player_ships"] if not is_sunk(ship, game["dog_shots"])
+            for cell in ship if cell in game["dog_shots"]
+        ]
+        if not damaged:
+            return False, "Сейчас нечего ремонтировать."
+        target = rng.choice(damaged)
+        game["dog_shots"].remove(target)
+        message = f"🔧 Палуба {index_to_coord(target, size)} восстановлена."
+    elif item_id == "smoke":
+        game["smoke"] = game.get("smoke", 0) + 1
+        message = "🌫 Следующий выстрел Пса уйдёт в воду."
+    elif item_id == "spyglass":
+        choices = list(unshot - enemy - set(game.get("revealed_water", [])))
+        if not choices:
+            return False, "Все безопасные клетки уже известны."
+        targets = rng.sample(choices, min(2, len(choices)))
+        game.setdefault("revealed_water", []).extend(targets)
+        message = "🔭 Пустые клетки: " + ", ".join(index_to_coord(cell, size) for cell in targets) + "."
+    elif item_id == "salvo":
+        game["salvo"] = game.get("salvo", 0) + 1
+        message = "💥 Следующий выстрел будет двойным."
+    else:
+        return False, "Неизвестный расходник."
+    if not store.consume(game["uid"], item_id):
+        return False, "Не удалось списать предмет."
+    game["message"] = message
+    finish_if_needed(game, store)
+    return True, message
 
 
 def menu_view() -> dict:
     return {"blocks": [
         {"type": "heading", "size": 2, "text": "⚓ Морской бой с Псом"},
         {"type": "paragraph", "text": (
-            "Выберите размер моря. Корабли расставятся автоматически, "
-            "а каждое синее поле станет отдельной кликабельной клеткой."
+            "Выберите размер моря, а затем самостоятельно расставьте свой флот."
         )},
         {"type": "buttons", "align": "center", "buttons": [
-            button("🌊 6×6 · +5", "size:6", "success"),
-            button("⚓ 8×8 · +10", "size:8", "primary"),
-            button("🫡 10×10 · +15", "size:10"),
+            button("🌊 6×6", "size:6", "success"),
+            button("⚓ 8×8", "size:8", "primary"),
+            button("🫡 10×10", "size:10"),
         ]},
         {"type": "buttons", "align": "center", "buttons": [
+            button("🛒 Магазин", "shop:0"),
             button("📊 Статистика", "stats"),
             button("📖 Правила", "rules"),
         ]},
     ]}
+
+
+def shop_view(store: Store, user_id: int, page: int = 0) -> dict:
+    items = list(SHOP_ITEMS.items())
+    pages = max(1, (len(items) + SHOP_PAGE_SIZE - 1) // SHOP_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    balance = store.stats(user_id)[4]
+    inventory = store.inventory(user_id)
+    blocks = [
+        {"type": "heading", "size": 2, "text": "🛒 Адмиральский магазин"},
+        {"type": "paragraph", "text": f"Ваш баланс: {balance} 🪙 · Страница {page + 1}/{pages}"},
+    ]
+    start = page * SHOP_PAGE_SIZE
+    for item_id, item in items[start:start + SHOP_PAGE_SIZE]:
+        owned = inventory.get(item_id, 0)
+        blocks += [
+            {"type": "heading", "size": 3, "text": f"{item['icon']} {item['name']}"},
+            {"type": "paragraph", "text": (
+                f"Цена: {item['price']} 🪙 · В наличии: {owned}\n{item['description']}"
+            )},
+            {"type": "buttons", "align": "center", "buttons": [
+                button("Купить", f"buy:{item_id}:{page}", "primary")
+            ]},
+        ]
+    navigation = []
+    if page > 0:
+        navigation.append(button("← Назад", f"shop:{page - 1}"))
+    if page + 1 < pages:
+        navigation.append(button("Дальше →", f"shop:{page + 1}"))
+    if navigation:
+        blocks.append({"type": "buttons", "align": "center", "buttons": navigation})
+    blocks.append({"type": "buttons", "align": "center", "buttons": [button("Меню", "menu")]})
+    return {"blocks": blocks}
+
+
+def placement_cells(game: dict) -> list[list[dict]]:
+    size = game["size"]
+    occupied = fleet_cells(game["player_ships"])
+    ready = next_ship_length(game) is None
+    cells = []
+    for index in range(size * size):
+        label, style = ("▰", "success") if index in occupied else ("≈", "primary")
+        data = "noop" if index in occupied or ready else f"place:{game['id']}:{index}"
+        cells.append({
+            "text": {"type": "button", "button": button(label, data, style)},
+            "align": "center", "valign": "middle",
+        })
+    return [cells[index:index + size] for index in range(0, len(cells), size)]
+
+
+def placement_view(game: dict) -> dict:
+    length = next_ship_length(game)
+    total = len(GAME_MODES[game["size"]]["ships"])
+    placed = len(game["player_ships"])
+    direction = "вертикально" if game.get("orientation") == "v" else "горизонтально"
+    blocks = [
+        {"type": "heading", "size": 2, "text": "🚢 Расстановка флота"},
+        {"type": "paragraph", "text": game["message"]},
+        {"type": "paragraph", "text": (
+            f"Поле {game['size']}×{game['size']} · размещено {placed}/{total}\n"
+            + (f"Следующий корабль: {length} палубы · {direction}" if length else "Флот полностью готов.")
+        )},
+        {"type": "buttons", "align": "center", "buttons": [
+            button("↔ Горизонтально", f"orient:{game['id']}:h", "primary" if game.get("orientation") == "h" else None),
+            button("↕ Вертикально", f"orient:{game['id']}:v", "primary" if game.get("orientation") == "v" else None),
+        ]},
+        {"type": "table", "cells": placement_cells(game), "is_bordered": True, "is_compact": True},
+    ]
+    actions = []
+    if game["player_ships"]:
+        actions.append(button("Отменить последний", f"undo:{game['id']}"))
+    actions.append(button("Случайно", f"random:{game['id']}"))
+    if length is None:
+        actions.append(button("Начать бой", f"begin:{game['id']}", "success"))
+    blocks += [
+        {"type": "buttons", "align": "center", "buttons": actions},
+        {"type": "buttons", "align": "center", "buttons": [button("Меню", "menu")]},
+    ]
+    return {"blocks": blocks}
 
 
 def board_cells(game: dict, own: bool = False) -> list[list[dict]]:
@@ -408,6 +724,10 @@ def board_cells(game: dict, own: bool = False) -> list[list[dict]]:
             label, style, data = "·", None, "noop"
         elif game["done"] and index in occupied:
             label, style, data = "▰", "success", "noop"
+        elif index in game.get("revealed_enemy", []):
+            label, style, data = "📡", "success", f"fire:{game['id']}:{index}"
+        elif index in game.get("revealed_water", []):
+            label, style, data = "○", None, f"fire:{game['id']}:{index}"
         else:
             label, style, data = "≈", "primary", f"fire:{game['id']}:{index}"
         cells.append({
@@ -418,7 +738,12 @@ def board_cells(game: dict, own: bool = False) -> list[list[dict]]:
     return [cells[index:index + size] for index in range(0, len(cells), size)]
 
 
-def battle_view(game: dict, own: bool = False, photo_media: str | bool | None = None) -> dict:
+def battle_view(
+    game: dict,
+    own: bool = False,
+    photo_media: str | bool | None = None,
+    inventory: dict[str, int] | None = None,
+) -> dict:
     mode = GAME_MODES[game["size"]]
     elapsed = max(0, int(time.time()) - game["started"])
     enemy_left = afloat(game["enemy_ships"], game["player_shots"])
@@ -444,12 +769,25 @@ def battle_view(game: dict, own: bool = False, photo_media: str | bool | None = 
         {"type": "paragraph", "text": "Ваш флот" if own else "Выберите клетку для выстрела"},
         {"type": "table", "cells": board_cells(game, own), "is_bordered": True, "is_compact": True},
         {"type": "paragraph", "text": "Легенда: ≈ вода · ▰ корабль · 💥 попадание · ☠ потоплен"},
-        {"type": "buttons", "align": "center", "buttons": [
-            button("Новая игра", "new", "primary"),
-            button("Статистика", "stats"),
-            button("Правила", "rules"),
-        ]},
     ]
+    available = [(item_id, count) for item_id, count in (inventory or {}).items() if count > 0]
+    if available and not game["done"]:
+        blocks.append({"type": "paragraph", "text": "🎒 Расходники — нажмите, чтобы применить"})
+        item_buttons = [
+            button(
+                f"{SHOP_ITEMS[item_id]['icon']} {SHOP_ITEMS[item_id]['name']} ×{count}",
+                f"use:{game['id']}:{item_id}",
+            )
+            for item_id, count in available if item_id in SHOP_ITEMS
+        ]
+        for start in range(0, len(item_buttons), 3):
+            blocks.append({"type": "buttons", "align": "center", "buttons": item_buttons[start:start + 3]})
+    blocks.append({"type": "buttons", "align": "center", "buttons": [
+        button("Новая игра", "new", "primary"),
+        button("Магазин", "shop:0"),
+        button("Статистика", "stats"),
+        button("Правила", "rules"),
+    ]})
     return {"blocks": blocks}
 
 
@@ -493,17 +831,20 @@ def render_scene(game: dict) -> bytes:
     return output.getvalue()
 
 
-def prepared_battle_view(api: API, game: dict, inline_id: str | None, own: bool = False):
+def prepared_battle_view(
+    api: API, game: dict, inline_id: str | None, store: Store, own: bool = False
+):
     image = render_scene(game)
+    inventory = store.inventory(game["uid"])
     if not inline_id:
-        return battle_view(game, own), image
+        return battle_view(game, own, inventory=inventory), image
     cache_chat_id = int(os.getenv("CACHE_CHAT_ID", str(game["uid"])))
     try:
         file_id = api.cache_photo(cache_chat_id, image)
-        return battle_view(game, own, file_id), None
+        return battle_view(game, own, file_id, inventory), None
     except Exception as error:
         print("inline scene fallback:", type(error).__name__, error)
-        return battle_view(game, own, False), None
+        return battle_view(game, own, False, inventory), None
 
 
 def stats_text(store: Store, user_id: int) -> str:
@@ -548,6 +889,7 @@ def main():
         {"command": "new", "description": "Новый бой"},
         {"command": "group", "description": "Запустить бой в группе"},
         {"command": "stats", "description": "Моя статистика"},
+        {"command": "shop", "description": "Магазин расходников"},
         {"command": "top", "description": "Рейтинг капитанов"},
         {"command": "rules", "description": "Правила игры"},
         {"command": "creator", "description": "Создатель бота"},
@@ -597,9 +939,12 @@ def main():
                         api.call("sendMessage", {"chat_id": chat_id, "text": "🏆 Лучшие капитаны\n" + listing})
                     elif text == "/rules":
                         api.call("sendMessage", {"chat_id": chat_id, "text": (
-                            "Стреляйте по синим клеткам поля противника. После каждого вашего "
-                            "выстрела отвечает Пёс. Побеждает тот, кто первым потопит весь флот."
+                            "Сначала расставьте флот: выберите направление и начальную клетку. "
+                            "Затем стреляйте по полю противника. После каждого вашего выстрела "
+                            "отвечает Пёс. Расходники покупаются в магазине за монеты от побед."
                         )})
+                    elif text == "/shop":
+                        api.send_rich(chat_id, shop_view(store, user_id))
                     elif text in {"/start", "/new", "/group"}:
                         api.send_rich(chat_id, menu_view())
                     continue
@@ -620,19 +965,73 @@ def main():
                     continue
                 if data == "rules":
                     api.answer(query["id"], (
-                        "Стреляйте по клеткам противника. 💥 — попадание, ☠ — корабль потоплен. "
-                        "После вашего выстрела ходит Пёс."
+                        "Сначала расставьте корабли. Затем стреляйте по клеткам противника. "
+                        "💥 — попадание, ☠ — корабль потоплен. После выстрела ходит Пёс."
                     ), True)
                     continue
                 if data in {"new", "menu"}:
                     api.answer(query["id"])
                     api.edit_rich(chat_id, message_id, menu_view(), inline_id)
                     continue
+                if data.startswith("shop:"):
+                    page = int(data.split(":", 1)[1])
+                    api.answer(query["id"])
+                    api.edit_rich(chat_id, message_id, shop_view(store, user_id, page), inline_id)
+                    continue
+                if data.startswith("buy:"):
+                    _, item_id, page = data.split(":")
+                    bought, notice = store.buy(user_id, item_id)
+                    api.answer(query["id"], notice, not bought)
+                    api.edit_rich(chat_id, message_id, shop_view(store, user_id, int(page)), inline_id)
+                    continue
                 if data.startswith("size:"):
-                    game = new_game(user_id, int(data.split(":", 1)[1]))
+                    game = new_game(user_id, int(data.split(":", 1)[1]), manual=True)
                     store.save(game)
                     api.answer(query["id"])
-                    view, image = prepared_battle_view(api, game, inline_id)
+                    api.edit_rich(chat_id, message_id, placement_view(game), inline_id)
+                    continue
+                if data.startswith(("place:", "orient:", "undo:", "random:", "begin:")):
+                    parts = data.split(":")
+                    game = store.get(parts[1])
+                    if not game or game["uid"] != user_id:
+                        api.answer(query["id"], "Эта расстановка принадлежит другому капитану.", True)
+                        continue
+                    notice = ""
+                    valid = True
+                    if data.startswith("place:"):
+                        valid, notice = place_player_ship(game, int(parts[2]))
+                    elif data.startswith("orient:"):
+                        game["orientation"] = parts[2] if parts[2] in {"h", "v"} else "h"
+                    elif data.startswith("undo:"):
+                        if game["player_ships"]:
+                            game["player_ships"].pop()
+                            game["message"] = "Последний корабль убран."
+                    elif data.startswith("random:"):
+                        game["player_ships"] = place_fleet(
+                            game["size"], GAME_MODES[game["size"]]["ships"]
+                        )
+                        game["message"] = "Флот расставлен случайно. Можно начинать бой."
+                    elif data.startswith("begin:"):
+                        valid, notice = begin_battle(game)
+                    store.save(game)
+                    api.answer(query["id"], notice, not valid)
+                    if data.startswith("begin:") and valid:
+                        view, image = prepared_battle_view(api, game, inline_id, store)
+                        api.edit_rich(chat_id, message_id, view, inline_id, image)
+                    else:
+                        api.edit_rich(chat_id, message_id, placement_view(game), inline_id)
+                    continue
+                if data.startswith("use:"):
+                    _, game_id, item_id = data.split(":")
+                    game = store.get(game_id)
+                    if not game or game["uid"] != user_id:
+                        api.answer(query["id"], "Этот бой принадлежит другому капитану.", True)
+                        continue
+                    used, notice = use_item(game, item_id, store)
+                    if used:
+                        store.save(game)
+                    api.answer(query["id"], notice, not used)
+                    view, image = prepared_battle_view(api, game, inline_id, store)
                     api.edit_rich(chat_id, message_id, view, inline_id, image)
                     continue
                 if data.startswith("fire:") or data.startswith("board:"):
@@ -647,7 +1046,7 @@ def main():
                         store.save(game)
                         own = False
                     api.answer(query["id"])
-                    view, image = prepared_battle_view(api, game, inline_id, own)
+                    view, image = prepared_battle_view(api, game, inline_id, store, own)
                     api.edit_rich(chat_id, message_id, view, inline_id, image)
                     continue
                 api.answer(query["id"], "Неизвестная команда.", True)
