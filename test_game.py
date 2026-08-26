@@ -1,5 +1,6 @@
 import unittest
 import sqlite3
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -32,6 +33,24 @@ class GameTests(unittest.TestCase):
     def test_cards_use_graphical_unicode_faces(self):
         self.assertEqual(bot.card_label("AS"), "🂡")
         self.assertEqual(bot.card_label("KH"), "🂾")
+
+    def test_pixel_card_emoji_is_valid_telegram_size(self):
+        from PIL import Image
+
+        for card in ("6S", "10H", "QD", "AC"):
+            image = Image.open(BytesIO(bot.render_card_emoji(card)))
+            self.assertEqual(image.size, (100, 100))
+            self.assertEqual(image.mode, "RGBA")
+
+    def test_custom_emoji_is_used_inside_clickable_card(self):
+        game = bot.new_game(1)
+        card = game["player"][0]
+        view = bot.game_view(game, emoji_ids={card: "emoji-card-id"})
+        player_table = [block for block in view["blocks"] if block["type"] == "table"][1]
+        buttons = [cell["text"]["button"] for row in player_table["cells"] for cell in row]
+        graphical = [item for item in buttons if isinstance(item["text"], list)]
+        self.assertEqual(len(graphical), 1)
+        self.assertEqual(graphical[0]["text"][0]["custom_emoji_id"], "emoji-card-id")
 
     def test_scene_supports_twelve_visible_cards(self):
         game = bot.new_game(1)
@@ -76,6 +95,15 @@ class GameTests(unittest.TestCase):
             database.close()
             store = bot.Store(path)
             self.assertEqual(store.stats(1), (3, 0, 0, 0, 0))
+
+    def test_card_emoji_mapping_is_persistent(self):
+        with TemporaryDirectory() as directory:
+            path = str(Path(directory) / "emoji.sqlite3")
+            store = bot.Store(path)
+            store.save_card_emoji({"AS": "ace-spades", "10H": "ten-hearts"})
+            self.assertEqual(bot.Store(path).card_emoji(), {
+                "AS": "ace-spades", "10H": "ten-hearts"
+            })
 
     def test_inline_game_uses_previously_uploaded_photo(self):
         class FakeAPI:
