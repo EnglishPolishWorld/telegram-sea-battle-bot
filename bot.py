@@ -5,14 +5,13 @@ import urllib.error
 import urllib.request
 
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_NAME = "Собачья Душа"
+ADMIN_NAME = "khdobromir"
 POLL_TIMEOUT = 30
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
 API = f"https://api.telegram.org/bot{TOKEN}/"
-pending_reason = {}
 
 
 def call(method, data=None):
@@ -25,118 +24,102 @@ def call(method, data=None):
         with urllib.request.urlopen(request, timeout=POLL_TIMEOUT + 10) as response:
             result = json.loads(response.read())
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode(errors="replace")
-        raise RuntimeError(f"Telegram HTTP {exc.code}: {body}") from exc
+        raise RuntimeError(exc.read().decode(errors="replace")) from exc
     if not result.get("ok"):
-        raise RuntimeError(f"Telegram API error: {result}")
+        raise RuntimeError(result)
     return result["result"]
 
 
-def ban_keyboard(username):
-    return {
-        "inline_keyboard": [
-            [{"text": "🚫 Бан", "callback_data": f"ban:{username}"}]
-        ]
+def handle_inline_query(inline_query):
+    query_id = inline_query["id"]
+    query = inline_query.get("query", "").strip()
+
+    if not query:
+        call("answerInlineQuery", {
+            "inline_query_id": query_id,
+            "results": [],
+            "cache_time": 0,
+            "is_personal": True,
+        })
+        return
+
+    parts = query.split(maxsplit=1)
+    username = parts[0]
+    reason = parts[1].strip() if len(parts) > 1 else ""
+
+    if not username.startswith("@"):
+        username = "@" + username
+
+    if not reason:
+        description = "Введите: @username причина"
+        text = "Введите имя пользователя и причину, например: @username нарушение правил"
+    else:
+        description = f"Забанить {username}: {reason}"
+        text = (
+            f"🚫 Пользователь {username} был забанен.\n"
+            f"👮 Администратор: {ADMIN_NAME}\n"
+            f"📝 Причина: {reason}"
+        )
+
+    result = {
+        "type": "article",
+        "id": "ban_result",
+        "title": "🚫 Бан пользователя" if reason else "Введите причину бана",
+        "description": description,
+        "input_message_content": {
+            "message_text": text,
+        },
     }
+
+    call("answerInlineQuery", {
+        "inline_query_id": query_id,
+        "results": [result],
+        "cache_time": 0,
+        "is_personal": True,
+    })
 
 
 def handle_update(update):
-    callback = update.get("callback_query")
-    if callback:
-        data = callback.get("data", "")
-        if not data.startswith("ban:"):
-            return
-
-        username = data[4:]
-        message = callback.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
-        if not chat_id or not username:
-            return
-
-        pending_reason[chat_id] = username
-        call("answerCallbackQuery", {"callback_query_id": callback["id"]})
-        call(
-            "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": f"Введите причину для {username}:",
-            },
-        )
+    if "inline_query" in update:
+        handle_inline_query(update["inline_query"])
         return
 
     message = update.get("message")
     if not message or "text" not in message:
         return
 
-    chat_id = message["chat"]["id"]
-    text = message["text"].strip()
-
-    if text == "/start" or text.startswith("/start@"):
-        call(
-            "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": "Введите @username пользователя.",
-            },
-        )
-        return
-
-    if chat_id in pending_reason:
-        username = pending_reason.pop(chat_id)
-        reason = text or "Причина не указана"
-        call(
-            "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": (
-                    f"🚫 Пользователь {username} был забанен.\n"
-                    f"👮 Администратор: {ADMIN_NAME}\n"
-                    f"📝 Причина: {reason}"
-                ),
-            },
-        )
-        return
-
-    # The user enters a username first. The bot then shows the Ban button.
-    if text.startswith("@") and " " not in text and len(text) > 1:
-        username = text.split("@", 1)[1]
-        if username:
-            username = "@" + username
-            call(
-                "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": f"Пользователь: {username}\nВыберите действие:",
-                    "reply_markup": ban_keyboard(username),
-                },
-            )
+    if message["text"].strip() == "/start":
+        call("sendMessage", {
+            "chat_id": message["chat"]["id"],
+            "text": "Используйте бота прямо в группе: @Chess_sabaka_bot @username причина",
+        })
 
 
 def main():
-    # Make sure polling is active even if a webhook was configured previously.
-    call("deleteWebhook", {"drop_pending_updates": False})
-    me = call("getMe")
-    print(f"Bot started: @{me.get('username')}", flush=True)
+    # Inline mode uses getUpdates too, so remove any old webhook first.
+    try:
+        call("deleteWebhook", {"drop_pending_updates": False})
+        me = call("getMe")
+        print("Bot started:", me.get("username"), "inline:", me.get("supports_inline_queries"))
+    except Exception as exc:
+        print("startup error:", repr(exc))
 
     offset = None
     while True:
         try:
-            updates = call(
-                "getUpdates",
-                {
-                    "offset": offset,
-                    "timeout": POLL_TIMEOUT,
-                    "allowed_updates": ["message", "callback_query"],
-                },
-            )
+            updates = call("getUpdates", {
+                "offset": offset,
+                "timeout": POLL_TIMEOUT,
+                "allowed_updates": ["message", "inline_query"],
+            })
             for update in updates:
                 offset = update["update_id"] + 1
                 try:
                     handle_update(update)
                 except Exception as exc:
-                    print("update error:", repr(exc), flush=True)
+                    print("update error:", repr(exc))
         except Exception as exc:
-            print("poll error:", repr(exc), flush=True)
+            print("poll error:", repr(exc))
             time.sleep(3)
 
 
