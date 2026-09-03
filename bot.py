@@ -5,7 +5,7 @@ import urllib.error
 import urllib.request
 
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_NAME = "khdobromir"
+ADMIN_NAME = "Собачья Душа"
 POLL_TIMEOUT = 30
 
 if not TOKEN:
@@ -44,28 +44,40 @@ def handle_inline_query(inline_query):
         return
 
     parts = query.split(maxsplit=1)
-    username = parts[0]
+    username = parts[0].strip()
     reason = parts[1].strip() if len(parts) > 1 else ""
 
     if not username.startswith("@"):
         username = "@" + username
 
     if not reason:
-        description = "Введите: @username причина"
-        text = "Введите имя пользователя и причину, например: @username нарушение правил"
-    else:
-        description = f"Забанить {username}: {reason}"
-        text = (
-            f"🚫 Пользователь {username} был забанен.\n"
-            f"👮 Администратор: {ADMIN_NAME}\n"
-            f"📝 Причина: {reason}"
-        )
+        call("answerInlineQuery", {
+            "inline_query_id": query_id,
+            "results": [{
+                "type": "article",
+                "id": "need_reason",
+                "title": "🚫 Бан пользователя",
+                "description": "Добавьте причину после username",
+                "input_message_content": {
+                    "message_text": "Укажите username и причину: @username причина",
+                },
+            }],
+            "cache_time": 0,
+            "is_personal": True,
+        })
+        return
+
+    text = (
+        f"🚫 Пользователь {username} был забанен.\n"
+        f"👮 Администратор: {ADMIN_NAME}\n"
+        f"📝 Причина: {reason}"
+    )
 
     result = {
         "type": "article",
         "id": "ban_result",
-        "title": "🚫 Бан пользователя" if reason else "Введите причину бана",
-        "description": description,
+        "title": "🚫 Бан пользователя",
+        "description": f"{username} — {reason}",
         "input_message_content": {
             "message_text": text,
         },
@@ -91,12 +103,11 @@ def handle_update(update):
     if message["text"].strip() == "/start":
         call("sendMessage", {
             "chat_id": message["chat"]["id"],
-            "text": "Используйте бота прямо в группе: @Chess_sabaka_bot @username причина",
+            "text": "Введите в группе: @Chess_sabaka_bot @username причина",
         })
 
 
 def main():
-    # Inline mode uses getUpdates too, so remove any old webhook first.
     try:
         call("deleteWebhook", {"drop_pending_updates": False})
         me = call("getMe")
