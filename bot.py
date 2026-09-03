@@ -12,7 +12,7 @@ if not TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
 API = f"https://api.telegram.org/bot{TOKEN}/"
-pending = set()
+pending_reason = {}
 
 
 def call(method, data=None):
@@ -31,33 +31,23 @@ def call(method, data=None):
     return result["result"]
 
 
-def keyboard():
-    return {"inline_keyboard": [[{"text": "🚫 Бан", "callback_data": "fake_ban"}]]}
-
-
-def start(chat_id):
-    call("sendMessage", {
-        "chat_id": chat_id,
-        "text": "Выберите действие:",
-        "reply_markup": keyboard(),
-    })
+def ban_keyboard(username):
+    return {"inline_keyboard": [[{"text": "🚫 Бан", "callback_data": f"ban:{username}"}]]}
 
 
 def handle_update(update):
     callback = update.get("callback_query")
     if callback:
-        if callback.get("data") != "fake_ban":
+        data = callback.get("data", "")
+        if not data.startswith("ban:"):
             return
-        chat = callback.get("message", {}).get("chat", {})
-        chat_id = chat.get("id")
+        username = data[4:]
+        chat_id = callback.get("message", {}).get("chat", {}).get("id")
         if not chat_id:
             return
-        pending.add(chat_id)
+        pending_reason[chat_id] = username
         call("answerCallbackQuery", {"callback_query_id": callback["id"]})
-        call("sendMessage", {
-            "chat_id": chat_id,
-            "text": "Введите в одном сообщении:\n@username причина\n\nНапример: @username нарушение правил",
-        })
+        call("sendMessage", {"chat_id": chat_id, "text": f"Введите причину для {username}:"})
         return
 
     message = update.get("message")
@@ -68,32 +58,27 @@ def handle_update(update):
     text = message["text"].strip()
 
     if text == "/start":
-        start(chat_id)
+        call("sendMessage", {"chat_id": chat_id, "text": "Введите @username пользователя."})
         return
 
-    if chat_id not in pending:
-        return
-
-    pending.discard(chat_id)
-    parts = text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[0].startswith("@"):
+    if chat_id in pending_reason:
+        username = pending_reason.pop(chat_id)
         call("sendMessage", {
             "chat_id": chat_id,
-            "text": "Неверный формат. Нажмите «🚫 Бан» и введите: @username причина",
-            "reply_markup": keyboard(),
+            "text": (
+                f"🚫 Пользователь {username} был забанен.\n"
+                f"👮 Администратор: {ADMIN_NAME}\n"
+                f"📝 Причина: {text}"
+            ),
         })
         return
 
-    username, reason = parts
-    call("sendMessage", {
-        "chat_id": chat_id,
-        "text": (
-            f"🚫 Пользователь {username} был забанен.\n"
-            f"👮 Администратор: {ADMIN_NAME}\n"
-            f"📝 Причина: {reason}"
-        ),
-        "reply_markup": keyboard(),
-    })
+    if text.startswith("@") and " " not in text and len(text) > 1:
+        call("sendMessage", {
+            "chat_id": chat_id,
+            "text": f"Пользователь: {text}\nВыберите действие:",
+            "reply_markup": ban_keyboard(text),
+        })
 
 
 def main():
